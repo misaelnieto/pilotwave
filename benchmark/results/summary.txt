@@ -1,0 +1,6 @@
+phase,samples,rss_max_kb,rss_mean_kb,rss_idle_max_kb,rss_idle_mean_kb,pss_max_kb,pss_mean_kb
+python,67,49428,48795,49428,49428,41007,40382
+rust,78,5028,5025,5028,5028,3012,3009
+
+rss_max: python=49428kB rust=5028kB ratio=9.8x
+rss_idle_mean: python=49428kB rust=5028kB ratio=9.8x

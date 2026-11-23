@@ -1,0 +1,26 @@
+# Development only — Postgres for local `just migrate` / worker testing.
+# This is NOT a production deployment mechanism.
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: pilotwave
+      POSTGRES_PASSWORD: pilotwave
+      POSTGRES_DB: pilotwave
+    ports:
+      - '5432:5432'
+    volumes:
+      - pilotwave-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U pilotwave']
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  mail:
+    image: marlonb/mailcrab:latest
+    ports:
+      - '1080:1080'
+      - '1025:1025'
+volumes:
+  pilotwave-db:

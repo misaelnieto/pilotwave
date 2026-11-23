@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pilotwave example</title>
+</head>
+<body>
+  <h1>Pilotwave example</h1>
+
+  {% if sent_reference %}
+    <p><strong>Enqueued.</strong> reference: <code>{{ sent_reference }}</code></p>
+  {% endif %}
+
+  <h2>Send a test email</h2>
+  <form method="post">
+    {% csrf_token %}
+    <p>
+      <label for="to">To:</label>
+      <input id="to" name="to" type="email" value="{{ default_to }}" required>
+    </p>
+    <p>
+      <label for="subject">Subject:</label>
+      <input id="subject" name="subject" type="text" value="{{ default_subject }}" required>
+    </p>
+    <button type="submit">Enqueue test email</button>
+  </form>
+
+  <h2>Queue</h2>
+  <p>depth (READY rows): <strong>{{ depth }}</strong></p>
+
+  <h2>Worker heartbeat</h2>
+  {% if heartbeat %}
+    <ul>
+      <li>key: <code>{{ heartbeat.key }}</code></li>
+      <li>last_seen: {{ heartbeat.last_seen }}</li>
+      <li>metadata: <code>{{ heartbeat.metadata }}</code></li>
+    </ul>
+  {% else %}
+    <p>No heartbeat yet — the worker has not written its
+    <code>pilotwave_worker</code> row.</p>
+  {% endif %}
+</body>
+</html>

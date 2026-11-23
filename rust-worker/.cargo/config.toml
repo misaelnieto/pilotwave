@@ -1,0 +1,7 @@
+# The worker is always compiled for musl to maximize wheel compatibility.
+# Only x86_64 is targeted for now (contract: Linux x86_64 wheels).
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+# Static musl needs no linker flags here beyond the target's default cc.

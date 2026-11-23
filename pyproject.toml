@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pilotwave"
+version = "0.1.0"
+description = "Django 6.x task producer + Rust worker for low-memory email delivery (Postgres queue, no broker)"
+readme = "README.md"
+authors = [
+  {name = "Noe Nieto", email = "nnieto@noenieto.com"},
+]
+requires-python = ">=3.14"
+license = { text = "MIT" }
+classifiers = [
+    "Framework :: Django :: 6",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+]
+dependencies = [
+    "django>=6.0.4",
+    "django-tasks-db==0.13.0",
+    "psycopg[binary]>=3.3.4",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2.0",
+    "django-types>=0.24.0",
+    "pytest>=9.0",
+    "pytest-django>=4.12",
+    "ruff>=0.16.0",
+]
+
+[tool.maturin]
+# Ship the Rust binary inside the wheel, installed into the venv's bin/ so
+# `uv add pilotwave` also provides the `pilotwave-worker` executable.
+bindings = "bin"
+manifest-path = "rust-worker/Cargo.toml"
+module-name = "pilotwave"
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = ["python"]
+DJANGO_SETTINGS_MODULE = "pilotwave.testsettings"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+src = ["python", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "DJ", "RET", "SIM"]
+
+[tool.ruff.format]
+quote-style = "single"

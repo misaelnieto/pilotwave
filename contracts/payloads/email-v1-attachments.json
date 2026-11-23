@@ -1,0 +1,14 @@
+{
+  "args": [],
+  "kwargs": {
+    "reference": "f6a1d3c8-7b2e-4a90-8f31-0c5d2e9b4a77",
+    "to": "team@example.com",
+    "subject": "Formulario con adjuntos",
+    "text_body": "El formulario incluye dos ficheros.",
+    "attachment_paths": [
+      "/srv/pilotwave/media/form_attachments/3f2a.../evidence.pdf",
+      "/srv/pilotwave/media/form_attachments/3f2a.../photo.jpg"
+    ],
+    "attachment_sizes": [123456, 65432]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "args": [],
+  "kwargs": {
+    "reference": "26f0c9ba-1c4e-4f2a-9d8b-9a0f5e2b7c11",
+    "to": "team@example.com",
+    "subject": "Nuevo formulario: Contacto",
+    "text_body": "Nombre: Ada\nEmail: ada@example.com\nMensaje: Hola",
+    "html_body": "<p>Nombre: Ada</p>\n<p>Email: ada@example.com</p>"
+  }
+}

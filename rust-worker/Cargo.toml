@@ -1,0 +1,29 @@
+[package]
+name = "pilotwave-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Rust worker that drains django.tasks-db queues created by Pilotwave"
+
+[[bin]]
+name = "pilotwave-worker"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+dotenvy = "0.15.7"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
+libc = "0.2"
+serde_json = "1.0"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "macros", "net", "time", "signal"] }
+
+# Deps copiadas del prototipo (pilotwave-worker): el nucleo db necesita
+# sqlx/tokio; lettre/dotenvy/libc/time las usa el lote 7.4 (mailer/config).
+# No anadir ni quitar sin coordinar con 7.4.
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "unwind"
