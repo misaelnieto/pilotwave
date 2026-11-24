@@ -1,15 +1,15 @@
 ---
-title: Extract Pilotwave from AIPH CRM
+title: Extract Pilotwave as standalone project
 type: plan
 status: done
 date: 2026-11-19
 ---
 
-# PLAN 001: Extract Pilotwave from AIPH CRM
+# PLAN 001: Extract Pilotwave as standalone project
 
 ## Objective
 
-Turn the working prototype in the `feat/rust-email-worker` worktree into a
+Turn the working internal prototype into a
 standalone, installable project without losing the contract knowledge that was
 learned there.
 
@@ -17,10 +17,10 @@ learned there.
 
 - [x] 1. Write `contracts/`: SQL mirror of `django-tasks-db==0.13.0`,
       heartbeat DDL, payload examples, rules and pending decisions.
-- [x] 2. Create the Python skeleton: installable app, model + migration,
-      producer API, settings for tests/dev (the skeleton's fallback task was
-      eliminated in paso 8 per P-5 owner decision).
-- [x] 3. Create the Rust skeleton: crate, musl target config, contract parser
+- [x] 2. Create the Python scaffold: installable app, model + migration,
+      producer API, settings for tests/dev (no Python fallback sender ships,
+      per P-5 decision).
+- [x] 3. Create the Rust scaffold: crate, musl target config, contract parser
       with tests that read the contract fixtures.
 - [x] 4. Create the `justfile` with `sync`, `dev-up/down`, `migrate`,
       `run-worker`, `test`, `lint`, `build`.
@@ -31,54 +31,47 @@ learned there.
 - [x] 7. Port the full worker loop: claim SQL, retries/backoff, SMTP,
       heartbeat, CLI (`status`, `run`, `list`, `inspect`, `log`).
 
-### Step 7 breakdown (owners + dependencies — no two lots write same files)
+### Step 7 breakdown (implementation detail)
 
-- [x] 7.1 INVENTARIO del prototipo (owner: `explore`). Solo lectura del
-  prototipo en `<worktree>/feat/rust-email-worker/pilotwave-worker/src/`.
-  Entregable = reporte: mapa modulo -> responsabilidad, SQL literals,
-  constantes, deps Cargo, tests. No escribe codigo. Sin dependencias.
-- [x] 7.2 Parte PYTHON (owner: `python-architect`, depende solo del contrato,
-  no de 7.1). Dueno exclusivo: `python/`, `tests/`. Revisar/ajustar al
-  contrato: `schema` en kwargs (P-6), round-trip, sin imports de apps del
-  host (fallback task eliminada en paso 8 per P-5 owner decision).
-- [x] 7.3 NUCLEO RUST de persistencia (owner: `general`, independiente de
-  7.1/7.2 salvo contrato). Dueno: `rust-worker/src/db/**`,
-  `rust-worker/src/contract.rs`, `rust-worker/Cargo.toml`. Portar `db/*` del
-  prototipo + integrar `contract.rs` + deps reales. Debe compilar con
+Ported from the internal prototype in three parts, then reviewed and wired
+up:
+
+- [x] 7.1 Prototype inventory (read-only). Deliverable: module-to-duty map,
+  SQL literals, constants, dependencies, tests. No code written.
+- [x] 7.2 Python side, contract-driven. Files: `python/`, `tests/`.
+  Adjusted to the contract: `schema` key ignored everywhere (P-6), no
+  host-app imports, no fallback sender (P-5 decision).
+- [x] 7.3 Rust persistence core. Files: `rust-worker/src/db/**`,
+  `rust-worker/src/contract.rs`, `rust-worker/Cargo.toml`. Ported the queue
+  access layer and wired the real dependencies. Must compile with
   `cargo check`.
-- [x] 7.4 EJECUCION Y CLI Rust (owner: `general`, depende de 7.3 + reporte
-  7.1). Dueno: `mailer.rs`, `attachments.rs`, `retry.rs`, `heartbeat.rs`,
-  `worker.rs`, `daemon.rs`, `cli.rs`, `log.rs`, `logging.rs`, `proc.rs`,
-  `config.rs`, `main.rs` en `rust-worker/src/`.
-- [x] 7.5 Revision adversarial PLAN + P-1..P-6 (owner: `biz-hawk`, sin
-  dependencias). SOLO edita markdown de `docs/` y `contracts/CONTRACT.md`.
-  No toca codigo. Propone eliminar/confirmar opciones con justificacion.
-  **Nota 7.5 (hecho):** veredictos en `docs/02-DECISIONS/002-pending-decisions.md`
-  + columna "Recomendación 7.5" en `contracts/CONTRACT.md`. Status sigue
-  `pending` en todo; decide el owner en paso 8. Resumen: confirmar P-1, P-2
-  (con constraint), P-3, P-4 (sin dedupe), P-6 (dual-accept, sunset raíz en
-  2.0); P-5 queda pendiente (confirmar solo como opt-in cableado, si no
-  eliminar antes de 1.0). **Decisión owner posterior 2026-11-21 (aplica sin
-  discutir, ver `contracts/CONTRACT.md`):** traceback exactamente 4096
-  bytes; `smtp_transient` solo en `metadata.last_error_code`; reaper zombie
-  cada `drain_once` (5 min + filtro `pilotwave-%`); P-6 pasa a kwargs-only
-  estricto — compat de raíz eliminada ahora, sin sunset en 2.0.
-- [x] 7.6 justfile + CI + docs developers (owner: `general`, depende de 7.4).
-  Dueno: `justfile`, `.github/`, `docs/05-DEVELOPERS/`. Recetas honestas
-  `run-worker`, `worker-status`, `stop`, `log`; target musl explicito en
-  `just build`.
+- [x] 7.4 Rust execution + CLI. Files: `mailer.rs`, `attachments.rs`,
+  `retry.rs`, `heartbeat.rs`, `worker.rs`, `daemon.rs`, `cli.rs`, `log.rs`,
+  `logging.rs`, `proc.rs`, `config.rs`, `main.rs` in `rust-worker/src/`.
+- [x] 7.5 Adversarial review of plan + P-1..P-6. Markdown only (`docs/`,
+  `contracts/CONTRACT.md`). No code changes. Verdicts recorded in
+  `docs/02-DECISIONS/002-pending-decisions.md` and `contracts/CONTRACT.md`:
+  confirm P-1, P-2 (with constraint), P-3, P-4 (no dedupe), P-6 (ignore any
+  `schema` key); P-5 pending at that point (confirm only as host-wired
+  opt-in, otherwise drop before 1.0). **Follow-up decision applied
+  2026-11-21 (see `contracts/CONTRACT.md`):** traceback exactly 4096 bytes;
+  `smtp_transient` only in `metadata.last_error_code`; zombie reaper every
+  `drain_once` (5 min window + `pilotwave-%` filter); P-6 is strict
+  kwargs-only, no root-level compat key.
+- [x] 7.6 `justfile` + CI + developer docs. Files: `justfile`, `.github/`,
+  `docs/05-DEVELOPERS/`. Working `run-worker`, `worker-status`, `stop`,
+  `log` recipes; explicit musl target in `just build`.
 
-  Orden de lanzamiento: en paralelo 7.1 + 7.2 + 7.3 + 7.5; cuando 7.1 y 7.3
-  reporten -> 7.4; finalmente 7.6. Integracion y verificacion final por el
-  coordinador (PASO 2): `just sync` -> `just test` -> `just lint` ->
-  `just build` (hecho 2026-11-20: 60 Python + 75 Rust verdes, wheel
-  manylinux1_x86_64 con binario musl static-pie x86-64). Nota: los
-  subcomandos `contract`/`check` de la era skeleton no existen ni en el
-  prototipo ni en el port (CLI real: status/run/list/inspect/stop/log);
-  verificacion = `pilotwave-worker --help` (exit 0) + tests de
-  `contract.rs` que leen `contracts/payloads/email-v1.json`.
-- [x] 8. Confirm the pending decisions (P-1…P-6) with the owner — all
-  `decided (owner)` 2026-11-21 (P-4 at-least-once, dedupe → roadmap R-0;
+  Launch order: 7.1 + 7.2 + 7.3 + 7.5 in parallel; then 7.4 once the
+  inventory and the persistence core were ready; finally 7.6. Final
+  integration check: `just sync` -> `just test` -> `just lint` ->
+  `just build` (done 2026-11-20: 60 Python + 75 Rust green, manylinux1
+  x86_64 wheel with static musl binary). Note: the early `contract`/`check`
+  subcommands never shipped (real CLI: status/run/list/inspect/stop/log);
+  verification = `pilotwave-worker --help` (exit 0) + `contract.rs` tests
+  reading `contracts/payloads/email-v1.json`.
+- [x] 8. Confirm the pending decisions (P-1 to P-6) -- all
+  `decided` 2026-11-21 (P-4 at-least-once, dedupe deferred to roadmap R-0;
   P-5 fallback eliminated, Rust worker only).
 
 ## Non-goals for this plan

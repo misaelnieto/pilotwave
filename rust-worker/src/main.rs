@@ -1,9 +1,9 @@
 //! pilotwave-worker — drains the `email` queue of `django-tasks-db`.
 //!
-//! Bootstrap fino: parsea CLI, carga config, despacha sin BD (`log`,
-//! `stop`, padre `--bg`) y delega en `worker::Worker` para oneshot
-//! (`status`/`inspect`/`list`/`run` único) y loop (`--fg`/`--bg-child`).
-//! `status` muestra la sección daemon aun si la BD está caída.
+//! Thin bootstrap: parse the CLI, load config, dispatch without a DB (`log`,
+//! `stop`, the `--bg` parent) and delegate to `worker::Worker` for oneshots
+//! (`status`/`inspect`/`list`/single `run`) and loops (`--fg`/`--bg-child`).
+//! `status` shows the daemon section even when the DB is down.
 
 mod attachments;
 mod cli;
@@ -42,13 +42,13 @@ async fn run() -> worker::Result<ExitCode> {
     // typed config. Real env vars win over the file.
     let env = config::Env::load()?;
     let config = config::Config::from_env(&env)?;
-    // `log` no toca la BD y su stdout lleva SOLO contenido del log: se
-    // atiende antes de cualquier banner (`starting ...` va a stdout).
+    // `log` never touches the DB and its stdout carries ONLY log content: it
+    // is served before any banner (`starting ...` goes to stdout).
     if let cli::Command::Log(args) = &cli.command {
         log::run_log(&config, args).await?;
         return Ok(ExitCode::SUCCESS);
     }
-    // `Debug` redacta `database_url` y `smtp_password`: seguro para logs.
+    // `Debug` redacts `database_url` and `smtp_password`: safe for logs.
     logging::debug(&format!("config: {config:?}"));
 
     // Never log `database_url`: it carries the DB password.
@@ -60,9 +60,9 @@ async fn run() -> worker::Result<ExitCode> {
         config.task_paths.join(",")
     ));
 
-    // Padre `--bg`: sonda idempotente + spawn, sin tocar la BD.
-    // La presentación (stdout/stderr/logging) vive aquí; `daemon` solo
-    // devuelve el outcome.
+    // `--bg` parent: idempotent probe + spawn, without touching the DB.
+    // Presentation (stdout/stderr/logging) lives here; `daemon` only
+    // returns the outcome.
     if matches!(&cli.command, cli::Command::Run(args) if args.bg && !args.bg_child) {
         return match daemon::run_bg_parent(&config, cli.verbose) {
             Ok(daemon::BgOutcome::AlreadyRunning(pid)) => {
@@ -94,7 +94,7 @@ async fn run() -> worker::Result<ExitCode> {
         };
     }
 
-    // `stop` no toca la BD: se atiende antes de conectar.
+    // `stop` never touches the DB: served before connecting.
     if matches!(cli.command, cli::Command::Stop) {
         return match daemon::run_stop(&config) {
             Ok(daemon::StopOutcome::AlreadyStopped) => {
@@ -114,30 +114,30 @@ async fn run() -> worker::Result<ExitCode> {
         };
     }
 
-    // Loop persistente: `--fg` foreground o `--bg-child` daemon (mismo loop,
-    // el hijo además sostiene el lock del PID file hasta morir).
+    // Persistent loop: `--fg` foreground or `--bg-child` daemon (same loop,
+    // the child additionally holds the PID-file lock until death).
     let is_loop = matches!(&cli.command, cli::Command::Run(args) if args.fg || args.bg_child);
     if is_loop {
         let is_bg_child = matches!(&cli.command, cli::Command::Run(args) if args.bg_child);
-        // §3.9: el reciclaje es exit 75 SIN `fatal:` (no es un error); el
-        // shutdown limpio es exit 0. Ambos pasan por el drop del pool.
+        // Recycling exits 75 WITHOUT `fatal:` (not an error); clean
+        // shutdown exits 0. Both go through the pool drop.
         return match worker::Worker::run_loop(config, is_bg_child).await? {
             worker::LoopEnd::Shutdown => Ok(ExitCode::SUCCESS),
             worker::LoopEnd::Recycle => Ok(ExitCode::from(75)),
         };
     }
 
-    // One-shot: una sola oportunidad y fallo alto (`?` → exit 1).
-    // `status` resuelve el daemon ANTES de tocar la BD: la sección daemon
-    // se imprime aun si Postgres está caído (BD KO => daemon en stdout +
-    // detalle en stderr + exit 1). Sin `PILOTWAVE_PID_FILE` no hay crash:
-    // la sección dice "no configurado".
+    // One-shot: single attempt, fail loud (`?` -> exit 1).
+    // `status` resolves the daemon BEFORE touching the DB: the daemon section
+    // prints even when Postgres is down (DB down => daemon on stdout +
+    // detail on stderr + exit 1). Without `PILOTWAVE_PID_FILE` there is no
+    // crash: the section reports "not configured".
     let daemon_info = if matches!(cli.command, cli::Command::Status) {
         Some(daemon::describe(&config))
     } else {
         None
     };
-    // R-7: los subcomandos de solo lectura usan el DSN de lectura si existe.
+    // Read-only subcommands use the reader DSN when configured (roadmap R-7).
     let read_only = matches!(
         &cli.command,
         cli::Command::Status | cli::Command::Inspect(_) | cli::Command::List(_)
@@ -151,7 +151,7 @@ async fn run() -> worker::Result<ExitCode> {
         Ok(pool) => pool,
         Err(err) => {
             if let Some(info) = &daemon_info {
-                // Solo `status` llega aquí con daemon resuelto.
+                // Only `status` reaches here with the daemon resolved.
                 println!("{}", cli::render_daemon_status(info));
                 eprintln!("error: base de datos no disponible: {err}");
                 return Err(worker::invalid_input(
@@ -162,9 +162,9 @@ async fn run() -> worker::Result<ExitCode> {
         }
     };
     logging::info("postgres connected (max_connections=1)");
-    // R-6 (audit 001 §A07): fail loud si el rol no tiene los GRANT minimos
-    // de `.env.example`. Solo en caminos de escritura (`run`): `status` /
-    // `inspect` / `list` usan el DSN de lectura y no escriben.
+    // Least-privilege check (roadmap R-6): fail loud when the role lacks the
+    // minimum `.env.example` GRANTs. Write paths only (`run`): `status` /
+    // `inspect` / `list` use the reader DSN and never write.
     if matches!(&cli.command, cli::Command::Run(_))
         && let Err(err) = db::verify_least_privilege(&pool, config.skip_grant_check).await
     {
@@ -188,11 +188,11 @@ async fn run() -> worker::Result<ExitCode> {
                 .map_err(worker::invalid_input)?;
             worker.run_list(&query).await?;
         }
-        // `stop` retorna antes de conectar (no toca la BD): inalcanzable.
+        // `stop` returns before connecting (never touches the DB): unreachable.
         cli::Command::Stop => {
             unreachable!("stop se atiende antes de conectar a la BD")
         }
-        // `log` idem (tail del archivo, sin BD): inalcanzable.
+        // `log` likewise (file tail, no DB): unreachable.
         cli::Command::Log(_) => {
             unreachable!("log se atiende antes de conectar a la BD")
         }
@@ -200,6 +200,6 @@ async fn run() -> worker::Result<ExitCode> {
             worker.run_once(args.id.as_deref()).await?;
         }
     }
-    // El pool cae por drop aquí (sin close explícito).
+    // The pool drops here (no explicit close).
     Ok(ExitCode::SUCCESS)
 }

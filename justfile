@@ -133,10 +133,11 @@ test:
     uv run pytest
     cargo test --manifest-path rust-worker/Cargo.toml
 
-# Audit dependencies (audit 001 §A06): Rust (cargo-audit/cargo-deny),
-# Python (pip-audit via uv) y la imagen postgres:14 (trivy). Los scanners
-# ausentes se documentan como SKIP; los presentes fallan alto si hallan
-# vulnerabilidades (trivy: advisory, exit 0 por defecto).
+# Audit dependencies (see docs/06-AUDITS/001-owasp-top10-2026-11-23.md):
+# Rust (cargo-audit/cargo-deny), Python (pip-audit via uv) and the
+# postgres:18 image (trivy). Missing scanners are reported as SKIP;
+# present scanners fail on high-severity findings
+# (trivy: advisory, exit 0 by default).
 [group("Quality")]
 audit:
     echo "== cargo-audit =="

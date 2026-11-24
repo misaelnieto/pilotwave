@@ -1,29 +1,28 @@
-//! Definición del CLI (`clap` derive).
+//! CLI definition (`clap` derive).
 //!
-//! PLAN-003 (fuera del plan original): el binario expone subcomandos.
-//! Todo lo relacionado con `clap` vive aquí; `main.rs` solo despacha y
-//! `db/` solo accede a datos.
+//! The binary exposes subcommands. Everything `clap`-related lives here;
+//! `main.rs` only dispatches and `db/` only accesses data.
 //!
-//! Comportamiento:
-//! - Sin subcomando: se muestra la ayuda (`arg_required_else_help`).
-//! - `status`: imprime la tabla de conteos (ver [`render_status_table`]).
-//! - `run`: ejecuta tareas disponibles (lógica en `main.rs` + `db/`).
-//! - `stop`: detiene el daemon `--bg` (SIGTERM + espera + SIGKILL,
-//!   idempotente; no toca la BD).
-//! - `list <ready|running|done|failed> [--limit N] [--offset M]`: lista tareas con
-//!   paginación (`LIMIT`/`OFFSET` en el query).
-//! - `inspect <UUID> [--show-pii]`: muestra todos los campos de una fila por id
-//!   (sin filtro de cola; solo lectura). Por defecto recorta la PII (`to`
-//!   solo dominio, cuerpos como presencia, `traceback` truncado); con
-//!   `--show-pii` muestra todo (solo operadores).
-//! - `log [-n N] [-f]`: últimas N líneas de `PILOTWAVE_LOG_FILE` y, con `-f`,
-//!   sigue los appends (tail); no toca la BD.
+//! Behavior:
+//! - Without a subcommand: show help (`arg_required_else_help`).
+//! - `status`: print the counts table (see [`render_status_table`]).
+//! - `run`: execute available tasks (logic in `main.rs` + `db/`).
+//! - `stop`: stop the `--bg` daemon (SIGTERM + wait + SIGKILL,
+//!   idempotent; never touches the DB).
+//! - `list <ready|running|done|failed> [--limit N] [--offset M]`: list tasks
+//!   with pagination (`LIMIT`/`OFFSET` in the query).
+//! - `inspect <UUID> [--show-pii]`: show every field of one row by id
+//!   (no queue filter; read-only). By default PII is trimmed (`to` shows
+//!   only the domain, bodies shown as presence, `traceback` truncated); with
+//!   `--show-pii` show everything (operators only).
+//! - `log [-n N] [-f]`: last N lines of `PILOTWAVE_LOG_FILE` and, with `-f`,
+//!   follow appends (tail); never touches the DB.
 
 use clap::{Args, Parser, Subcommand};
 
 use crate::db::models::{InspectedTask, ListQuery, ListedTask, QueueStatus, TaskStatus};
 
-/// Sidecar que drena la cola `email` de `django-tasks-db`.
+/// Sidecar draining the `email` queue of `django-tasks-db`.
 #[derive(Debug, Parser)]
 #[command(
     name = "pilotwave-worker",
@@ -32,7 +31,7 @@ use crate::db::models::{InspectedTask, ListQuery, ListedTask, QueueStatus, TaskS
     arg_required_else_help = true
 )]
 pub struct Cli {
-    /// Muestra mensajes de diagnóstico `DEBUG` (vale antes o después del subcomando).
+    /// Show `DEBUG` diagnostic messages (valid before or after the subcommand).
     #[arg(short, long, global = true, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
     #[command(subcommand)]
@@ -41,49 +40,48 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
-    /// Muestra el conteo de tareas disponibles, en proceso y completadas.
+    /// Show the count of available, in-flight and completed tasks.
     Status,
-    /// Reclama y finaliza: una tarea (`--id`), una genérica, o loop (`--fg`).
+    /// Claim and finalize: one task (`--id`), one generic task, or loop (`--fg`).
     Run(RunArgs),
-    /// Lista tareas por estado con paginación.
+    /// List tasks by state with pagination.
     List(ListArgs),
-    /// Muestra todos los campos de una tarea por id (sin filtro de cola).
+    /// Show every field of one task by id (no queue filter).
     Inspect(InspectArgs),
-    /// Detiene el daemon `--bg`: SIGTERM, espera ≥35 s y SIGKILL si hace
-    /// falta (§3.9). Idempotente (sin daemon => exit 0) y sin tocar la BD.
+    /// Stop the `--bg` daemon: SIGTERM, wait >=35 s and SIGKILL when needed.
+    /// Idempotent (no daemon => exit 0) and never touches the DB.
     Stop,
-    /// Muestra las últimas N líneas de `PILOTWAVE_LOG_FILE` (tail).
+    /// Show the last N lines of `PILOTWAVE_LOG_FILE` (tail).
     ///
-    /// Sin `-f` imprime y sale; con `-f` imprime y sigue los appends
-    /// (poll ~500 ms) hasta SIGTERM/SIGINT (exit 0). Ante rotación
-    /// (inode distinto) o truncado avisa a stderr (`rotación detectada:
-    /// reabriendo desde el inicio`) y reabre desde 0.
-    /// No toca la BD.
+    /// Without `-f` print and exit; with `-f` print and follow appends
+    /// (~500 ms poll) until SIGTERM/SIGINT (exit 0). On rotation
+    /// (different inode) or truncation warn on stderr and reopen from 0.
+    /// Never touches the DB.
     Log(LogArgs),
 }
 
-/// Argumentos de `run`: una tarea concreta, una genérica, loop, o daemon.
-/// `--id`, `--fg` y `--bg` son excluyentes entre sí (`--bg-child` es interno).
+/// Arguments for `run`: one specific task, one generic task, loop, or daemon.
+/// `--id`, `--fg` and `--bg` are mutually exclusive (`--bg-child` is internal).
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct RunArgs {
-    /// Id (UUID) de la tarea a reclamar. Solo reclama si es ejecutable:
-    /// READY + vencida + dentro del alcance (cola/backend/task_path).
+    /// Id (UUID) of the task to claim. Only claims when runnable:
+    /// READY + due + in scope (queue/backend/task_path).
     #[arg(long, value_name = "UUID", conflicts_with_all = ["fg", "bg"])]
     pub id: Option<String>,
-    /// Loop persistente en foreground con shutdown graceful (SIGTERM/SIGINT).
+    /// Persistent foreground loop with graceful shutdown (SIGTERM/SIGINT).
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with_all = ["id", "bg"])]
     pub fg: bool,
-    /// Mismo loop que `--fg` pero como daemon destacamentado (sobrevive al
-    /// cierre del shell). Escribe PID file con lock exclusivo (§3.8).
+    /// Same loop as `--fg` but as a detached daemon (survives shell exit).
+    /// Writes a PID file with an exclusive lock.
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with_all = ["id", "fg"])]
     pub bg: bool,
-    /// Hijo destacamentado de `--bg` (uso interno): adquiere el lock del PID
-    /// file y corre el loop. Oculto en la ayuda; manual equivale a `--fg` + lock.
+    /// Detached child of `--bg` (internal use): acquires the PID-file lock
+    /// and runs the loop. Hidden from help; manual mode equals `--fg` + lock.
     #[arg(long, hide = true, action = clap::ArgAction::SetTrue, conflicts_with = "id")]
     pub bg_child: bool,
 }
 
-/// Argumentos de `list`: exige un subcomando de estado; sin él imprime ayuda.
+/// Arguments for `list`: require a state subcommand; without one print help.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(arg_required_else_help = true)]
 pub struct ListArgs {
@@ -91,24 +89,24 @@ pub struct ListArgs {
     pub command: ListCommand,
 }
 
-/// Estado a listar. Cada variante acepta `--limit`/`--offset`.
+/// State to list. Every variant accepts `--limit`/`--offset`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 pub enum ListCommand {
-    /// Tareas en estado READY.
+    /// Tasks in READY state.
     Ready(Pagination),
-    /// Tareas en estado RUNNING.
+    /// Tasks in RUNNING state.
     Running(Pagination),
-    /// Tareas en estado SUCCESSFUL.
+    /// Tasks in SUCCESSFUL state.
     Done(Pagination),
-    /// Tareas en estado FAILED.
+    /// Tasks in FAILED state.
     ///
-    /// Reusa la tabla genérica (`id`, `task_path`, `priority`, `enqueued_at`);
-    /// el detalle del error queda para el futuro subcomando `inspect`.
+    /// Reuse the generic table (`id`, `task_path`, `priority`, `enqueued_at`);
+    /// error detail is left to `inspect`.
     Failed(Pagination),
 }
 
 impl ListCommand {
-    /// Estado en BD + paginación, para el despacho en `main.rs`.
+    /// DB state + pagination, for dispatch in `main.rs`.
     pub fn status_and_pagination(&self) -> (&'static str, Pagination) {
         match *self {
             ListCommand::Ready(pagination) => ("READY", pagination),
@@ -118,8 +116,8 @@ impl ListCommand {
         }
     }
 
-    /// Query Object validado para `db`: mapea la variante a `TaskStatus`
-    /// y valida `limit`/`offset` en el dominio.
+    /// Validated query object for `db`: maps the variant to `TaskStatus`
+    /// and validates `limit`/`offset` in the domain.
     pub fn to_list_query(self) -> Result<ListQuery, String> {
         let (db_str, pagination) = self.status_and_pagination();
         pagination.validate()?;
@@ -133,19 +131,19 @@ impl ListCommand {
     }
 }
 
-/// Paginación común: se mapea directo a `LIMIT`/`OFFSET` del query.
+/// Shared pagination: maps directly to the query's `LIMIT`/`OFFSET`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Args)]
 pub struct Pagination {
-    /// Filas a devolver.
+    /// Rows to return.
     #[arg(long, default_value_t = 25)]
     pub limit: i64,
-    /// Filas a saltar.
+    /// Rows to skip.
     #[arg(long, default_value_t = 0)]
     pub offset: i64,
 }
 
 impl Pagination {
-    /// Valida rangos antes de tocar la BD (la compartimos en OpalStack).
+    /// Validate ranges before touching the DB.
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=200).contains(&self.limit) {
             return Err(format!(
@@ -160,24 +158,24 @@ impl Pagination {
     }
 }
 
-/// Límite superior de `--lines` en `log` (evita salidas gigantes).
+/// Upper bound for `--lines` in `log` (avoids giant outputs).
 pub const LOG_LINES_MAX: i64 = 10_000;
 
-/// Argumentos de `log`: tail del log line-oriented del daemon (§3.10.6).
+/// Arguments for `log`: tail of the daemon's line-oriented log.
 ///
-/// El contrato largo (follow, rotación, truncado, stdout/stderr) vive en
-/// el doc del variante `Command::Log`, que es lo que `--help` muestra.
+/// The long contract (follow, rotation, truncation, stdout/stderr) lives in
+/// the `Command::Log` variant docs, which is what `--help` shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Args)]
 pub struct LogArgs {
-    /// Líneas finales a mostrar (1-10000).
+    /// Trailing lines to show (1-10000).
     #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
     pub lines: i64,
-    /// Sigue el archivo tras mostrar las últimas N líneas (poll ~500 ms).
+    /// Follow the file after showing the last N lines (~500 ms poll).
     #[arg(short = 'f', long, action = clap::ArgAction::SetTrue)]
     pub follow: bool,
 }
 
-/// Valida `--lines`: entero en 1..=10000. Mensaje listo para stderr.
+/// Validate `--lines`: integer in 1..=10000. Message ready for stderr.
 pub fn validate_log_lines(n: i64) -> Result<u64, String> {
     if (1..=LOG_LINES_MAX).contains(&n) {
         Ok(n as u64)
@@ -188,26 +186,27 @@ pub fn validate_log_lines(n: i64) -> Result<u64, String> {
     }
 }
 
-/// Argumentos de `inspect`: el id de la fila a mostrar.
-/// Por defecto la PII sale recortada; `--show-pii` es solo para operadores.
+/// Arguments for `inspect`: the id of the row to show.
+/// By default PII is trimmed; `--show-pii` is operators-only.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct InspectArgs {
-    /// Id (UUID) de la tarea en `django_tasks_database_dbtaskresult`.
+    /// Id (UUID) of the task row in `django_tasks_database_dbtaskresult`.
     #[arg(value_name = "UUID")]
     pub id: String,
-    /// Muestra la PII completa (`to`, cuerpos y `traceback` sin recortar).
+    /// Show full PII (`to`, bodies and `traceback` untrimmed).
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub show_pii: bool,
 }
 
-/// Caracteres visibles de `subject` en el modo recortado (defecto).
+/// Visible `subject` characters in trimmed mode (default).
 pub const INSPECT_SUBJECT_MAX_CHARS: usize = 80;
-/// Caracteres visibles de `traceback` en el modo recortado (defecto).
+/// Visible `traceback` characters in trimmed mode (default).
 pub const INSPECT_TRACEBACK_MAX_CHARS: usize = 1000;
-/// Caracteres visibles de un `args_kwargs` no-JSON en el modo recortado.
+/// Visible characters of a non-JSON `args_kwargs` in trimmed mode.
 pub const INSPECT_RAW_MAX_CHARS: usize = 1000;
 
-/// Trunca a N caracteres (sin partir UTF-8); si recorta, avisa cómo ver todo.
+/// Truncate to N characters (never splitting UTF-8); when trimming, tell how
+/// to see everything.
 fn truncate_chars(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_owned();
@@ -216,8 +215,8 @@ fn truncate_chars(value: &str, max: usize) -> String {
     format!("{truncated}… [truncado, usa --show-pii]")
 }
 
-/// Enmascara un email mostrando solo el dominio (`***@dominio`); sin
-/// arroba válida devuelve `[redacted]`.
+/// Mask an email showing only the domain (`***@domain`); without a valid
+/// at-sign return `[redacted]`.
 fn mask_email(value: &str) -> String {
     let single_at = value.chars().filter(|&c| c == '@').count() == 1;
     match value.rsplit_once('@') {
@@ -226,11 +225,11 @@ fn mask_email(value: &str) -> String {
     }
 }
 
-/// Recorta la PII de `args_kwargs` para el modo por defecto de `inspect`:
-/// `to` muestra solo el dominio, `subject` se trunca y los cuerpos se
-/// sustituyen por presencia (`[presente: N chars]`). Vale tanto para el
-/// formato real (`{"args", "kwargs"}`) como para un objeto plano; el resto
-/// de claves se conserva para operar. Si no es JSON, trunca el texto.
+/// Trim `args_kwargs` PII for the default `inspect` mode: `to` shows only
+/// the domain, `subject` is truncated and bodies are replaced by presence
+/// (`[present: N chars]`). Applies both to the real format
+/// (`{"args", "kwargs"}`) and to a flat object; remaining keys are kept
+/// for operations. When not JSON, truncate the text.
 fn redact_args_kwargs(raw: &str) -> String {
     let mut value: serde_json::Value = match serde_json::from_str(raw) {
         Ok(value) => value,
@@ -271,13 +270,13 @@ fn redact_args_kwargs(raw: &str) -> String {
         .unwrap_or_else(|_| truncate_chars(raw, INSPECT_RAW_MAX_CHARS))
 }
 
-/// Renderiza el detalle de `inspect` como líneas `clave: valor`.
+/// Render the `inspect` detail as `key: value` lines.
 ///
-/// Por defecto (`show_pii = false`) recorta la PII: `to` muestra solo el
-/// dominio, los cuerpos aparecen como presencia y `subject`/`traceback` se
-/// truncan. Con `show_pii = true` (flag `--show-pii`, solo operadores) sale
-/// todo: `traceback` completo y `args_kwargs` reindentado como JSON.
-/// Los `None` se muestran como `-`.
+/// By default (`show_pii = false`) PII is trimmed: `to` shows only the
+/// domain, bodies appear as presence and `subject`/`traceback` are
+/// truncated. With `show_pii = true` (`--show-pii` flag, operators only)
+/// everything is shown: full `traceback` and `args_kwargs` reindented as
+/// JSON. `None` values render as `-`.
 pub fn render_inspected_task(task: &InspectedTask, show_pii: bool) -> String {
     fn opt(value: &Option<String>) -> &str {
         value.as_deref().unwrap_or("-")
@@ -319,12 +318,12 @@ pub fn render_inspected_task(task: &InspectedTask, show_pii: bool) -> String {
     out
 }
 
-/// Imprime el detalle de `inspect` en stdout.
+/// Print the `inspect` detail to stdout.
 pub fn print_inspected_task(task: &InspectedTask, show_pii: bool) {
     print!("{}", render_inspected_task(task, show_pii));
 }
 
-/// Reindenta `raw` si es JSON válido; si no, devuelve el texto tal cual.
+/// Reindent `raw` when it is valid JSON; otherwise return the text as-is.
 fn pretty_json_or_raw(raw: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| raw.to_owned()),
@@ -332,18 +331,18 @@ fn pretty_json_or_raw(raw: &str) -> String {
     }
 }
 
-/// Detecta el error de Postgres cuando el id no es un UUID válido.
+/// Detect the Postgres error raised when the id is not a valid UUID.
 pub fn is_uuid_syntax_error(db_message: &str) -> bool {
     db_message.contains("invalid input syntax for type uuid")
 }
 
-/// Mensaje limpio (estilo uso) para un id que no es UUID.
+/// Clean (usage-style) message for a non-UUID id.
 pub fn render_inspect_uuid_error(id: &str) -> String {
     format!("id inválido: '{id}' no es un UUID válido; uso: inspect <UUID>")
 }
 
-/// Mapea un error de BD de `inspect` a mensaje para el usuario:
-/// UUID inválido => mensaje limpio; resto => error tal cual.
+/// Map an `inspect` DB error to a user message:
+/// invalid UUID => clean message; anything else => error as-is.
 pub fn format_inspect_error(id: &str, db_message: &str) -> String {
     if is_uuid_syntax_error(db_message) {
         render_inspect_uuid_error(id)
@@ -352,8 +351,8 @@ pub fn format_inspect_error(id: &str, db_message: &str) -> String {
     }
 }
 ///
-/// Separa el render del `println!` para poder probarlo sin capturar stdout.
-/// Renderiza la tabla de `status` como texto.
+/// Keep rendering separate from `println!` for testing without capturing
+/// stdout. Render the `status` table as text.
 ///
 /// Separa el render del `println!` para poder probarlo sin capturar stdout.
 pub fn render_status_table(status: &QueueStatus) -> String {
@@ -400,21 +399,21 @@ pub fn render_status_table(status: &QueueStatus) -> String {
     out
 }
 
-/// Imprime la tabla de `status` en stdout.
+/// Print the `status` table to stdout.
 pub fn print_status_table(status: &QueueStatus) {
     println!("{}", render_status_table(status));
 }
 
-/// Estado del daemon para la sección `daemon:` de `status`.
+/// Daemon state for the `daemon:` section of `status`.
 ///
-/// `Running` lleva los datos best-effort ya resueltos (`None` = `/proc`
-/// ilegible => se pinta `n/a`, sin fallar).
+/// `Running` carries the already-resolved best-effort data (`None` = `/proc`
+/// unreadable => rendered `n/a`, never failing).
 pub enum DaemonInfo {
-    /// Sin `PILOTWAVE_PID_FILE`: el daemon nunca pudo configurarse.
+    /// Without `PILOTWAVE_PID_FILE`: the daemon could never be configured.
     NotConfigured,
-    /// Hay pidfile pero sin lock vivo (falta, stale o desbloqueado).
+    /// A pidfile exists but no lock is held (missing, stale or unlocked).
     NotRunning,
-    /// Lock tomado por un proceso con identidad válida.
+    /// Lock held by a process with valid identity.
     Running {
         pid: u32,
         uptime: Option<u64>,
@@ -422,14 +421,14 @@ pub enum DaemonInfo {
     },
 }
 
-/// Renderiza la sección daemon de `status` (una línea).
+/// Render the `status` daemon section (one line).
 ///
 /// Separa el render del `println!` para poder probarlo sin capturar stdout.
-/// Ejemplos:
+/// Examples:
 /// - `daemon: running pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB)`
-/// - `daemon: running pid=1234 uptime=n/a rss=n/a` (fallo best-effort)
-/// - `daemon: no corriendo (pidfile stale/unlocked)`
-/// - `daemon: no configurado (PILOTWAVE_PID_FILE ausente)`
+/// - `daemon: running pid=1234 uptime=n/a rss=n/a` (best-effort failure)
+/// - `daemon: not running (pidfile stale/unlocked)`
+/// - `daemon: not configured (PILOTWAVE_PID_FILE missing)`
 pub fn render_daemon_status(state: &DaemonInfo) -> String {
     match state {
         DaemonInfo::NotConfigured => {
@@ -452,13 +451,13 @@ pub fn render_daemon_status(state: &DaemonInfo) -> String {
     }
 }
 
-/// Renderiza la línea `heartbeat:` de `status` desde la fila BD (§3.10).
+/// Render the `status` `heartbeat:` line from the DB row.
 ///
-/// `metadata` se parsea best-effort: si falta o trae basura, los campos
-/// pintan `n/a`/`-` en vez de fallar (el heartbeat nunca rompe `status`).
+/// `metadata` is parsed best-effort: when missing or garbage, fields render
+/// `n/a`/`-` instead of failing (the heartbeat never breaks `status`).
 /// Ejemplos:
 /// - `heartbeat: fresh last_seen=2026-11-19T12:00:00Z (hace 3s) tasks_processed=42 pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB) last_task=… last_error=-`
-/// - `heartbeat: stale …` (misma forma, el worker murió o se atascó)
+/// - `heartbeat: stale …` (same shape, the worker died or got stuck)
 pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -> String {
     let fresh = crate::heartbeat::freshness(age_secs);
     let v: serde_json::Value = serde_json::from_str(metadata).unwrap_or(serde_json::Value::Null);
@@ -485,19 +484,19 @@ pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -
     )
 }
 
-/// Mensaje de `stop` cuando no hay daemon vivo.
+/// `stop` message when no daemon is alive.
 ///
-/// Idempotente (apto para cron): pidfile ausente, stale o desbloqueado, o
-/// el PID ya muerto => exit 0 con esta línea en stdout.
+/// Idempotent (cron-safe): missing, stale or unlocked pidfile, or an
+/// already-dead PID => exit 0 with this line on stdout.
 pub fn render_stop_not_running() -> String {
     "daemon: no corriendo".to_owned()
 }
 
-/// Mensaje de éxito de `stop` tras matar al daemon.
+/// `stop` success message after killing the daemon.
 ///
-/// `forced` distingue el camino: `false` = bastó SIGTERM, `true` = hizo
-/// falta SIGKILL. Separa el render del `println!` para probarlo sin
-/// capturar stdout.
+/// `forced` tells the paths apart: `false` = SIGTERM was enough, `true` =
+/// SIGKILL was needed. Keep rendering separate from `println!` for testing
+/// without capturing stdout.
 pub fn render_stop_done(pid: u32, forced: bool) -> String {
     if forced {
         format!("daemon detenido pid={pid} (SIGKILL)")
@@ -506,7 +505,7 @@ pub fn render_stop_done(pid: u32, forced: bool) -> String {
     }
 }
 
-/// Renderiza la tabla de `list <estado>` como texto.
+/// Render the `list <state>` table as text.
 pub fn render_task_list(tasks: &[ListedTask]) -> String {
     const HEADERS: [&str; 4] = ["id", "task_path", "priority", "enqueued_at"];
     let mut widths = [
@@ -550,7 +549,7 @@ pub fn render_task_list(tasks: &[ListedTask]) -> String {
     out
 }
 
-/// Imprime la tabla de `list <estado>` en stdout.
+/// Print the `list <state>` table to stdout.
 pub fn print_task_list(tasks: &[ListedTask]) {
     println!("{}", render_task_list(tasks));
 }
@@ -609,7 +608,7 @@ mod tests {
         assert!(!args.fg);
         assert!(!args.bg);
         assert!(!args.bg_child);
-        // inspect con UUID válido (por defecto recorta la PII).
+        // inspect with valid UUID (trims PII by default).
         let uuid = "4b5ab53d-c51d-4845-9daa-3f88b401ac07";
         let cli = Cli::try_parse_from(["pilotwave-worker", "inspect", uuid]).unwrap();
         let Command::Inspect(args) = cli.command else {
@@ -690,7 +689,7 @@ mod tests {
             vec!["pilotwave-worker", "--verbose", "run"],
             vec!["pilotwave-worker", "-v", "list", "ready"],
             vec!["pilotwave-worker", "--verbose", "list", "done"],
-            // Global: también vale después del subcomando y en log/stop.
+            // Global flag: also valid after the subcommand and in log/stop.
             vec!["pilotwave-worker", "status", "-v"],
             vec!["pilotwave-worker", "run", "--verbose"],
             vec!["pilotwave-worker", "-v", "log"],
@@ -720,7 +719,7 @@ mod tests {
                 offset: 0
             }
         );
-        // done con paginación explícita.
+        // done with explicit pagination.
         let cli = Cli::try_parse_from([
             "pilotwave-worker",
             "list",
@@ -738,7 +737,7 @@ mod tests {
         assert_eq!(status, "SUCCESSFUL");
         assert_eq!(pagination.limit, 10);
         assert_eq!(pagination.offset, 40);
-        // failed mapea a FAILED y valida límites.
+        // failed maps to FAILED and validates limits.
         let cli = Cli::try_parse_from([
             "pilotwave-worker",
             "list",
@@ -883,7 +882,7 @@ mod tests {
 
     #[test]
     fn inspect_recorta_to_sin_arroba_y_args_planos() {
-        // Sin arroba válida => [redacted]; objeto plano (sin `kwargs`) también
+        // Without a valid at-sign => [redacted]; flat object (no `kwargs`) too
         // se recorta.
         let task = InspectedTask {
             id: "11111111-2222-4333-8444-555555555555".to_owned(),
@@ -940,7 +939,7 @@ mod tests {
 
     #[test]
     fn garbage_id_maps_to_clean_uuid_error() {
-        // UUID v4 válido + error ajeno: pasa tal cual, no mensaje limpio.
+        // Valid UUID v4 + foreign error: passed through, no clean message.
         let other =
             format_inspect_error("550e8400-e29b-41d4-a716-446655440000", "connection refused");
         assert!(other.contains("connection refused"));

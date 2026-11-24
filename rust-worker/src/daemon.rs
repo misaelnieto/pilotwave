@@ -1,15 +1,15 @@
-//! PID file con lock exclusivo para el daemon `--bg` (PLAN-003 §3.8).
+//! PID file with an exclusive lock for the `--bg` daemon.
 //!
-//! Protocolo (deja listo el diseño para `stop` y `status`):
-//! - El hijo destacamentado abre el archivo, toma `flock` exclusivo no
-//!   bloqueante, escribe su PID y **mantiene el fd abierto toda su vida**.
-//!   Cualquier muerte (exit, SIGKILL, OOM) suelta el lock sola: nunca hay
-//!   locks stale.
-//! - El texto del PID sí puede quedar stale; el lock es lo autoritativo:
-//!   `status` (paso posterior) dirá "vivo" solo si el lock está tomado por un
-//!   proceso cuyo cmdline contiene `pilotwave-worker` (identity check §3.8).
-//! - `stop` (paso posterior): SIGTERM al PID, espera ≥35 s (§3.9), luego
-//!   SIGKILL; la liberación del lock confirma la muerte.
+//! Protocol (leaves the design ready for `stop` and `status`):
+//! - The detached child opens the file, takes a non-blocking exclusive
+//!   `flock`, writes its PID and **keeps the fd open for its whole life**.
+//!   Any death (exit, SIGKILL, OOM) releases the lock on its own: locks are
+//!   never stale.
+//! - The PID text may go stale; the lock is authoritative: `status` reports
+//!   "alive" only when the lock is held by a process whose cmdline contains
+//!   `pilotwave-worker` (identity check).
+//! - `stop`: SIGTERM the PID, wait >=35 s, then SIGKILL; releasing the lock
+//!   confirms the death.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -19,16 +19,16 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 
-/// Resuelve la sección daemon de `status` sin tocar la BD.
+/// Resolve the `status` daemon section without touching the DB.
 ///
-/// Sin `PILOTWAVE_PID_FILE` => `NotConfigured` (sin exigir el log, a
-/// diferencia de `paths()`); con pidfile, sonda el lock + identidad y
-/// resuelve uptime/rss best-effort (`None` = `/proc` ilegible => `n/a`).
+/// Without `PILOTWAVE_PID_FILE` => `NotConfigured` (no log required, unlike
+/// `paths()`); with a pidfile, probe the lock + identity and resolve
+/// uptime/rss best-effort (`None` = unreadable `/proc` => `n/a`).
 pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
     match config.pid_file.as_ref() {
         None => crate::cli::DaemonInfo::NotConfigured,
-        // Nótese: `config.pid_file` directo, NO `paths()`
-        // (ese exige también el log; aquí solo importa el pidfile).
+        // Note: `config.pid_file` directly, NOT `paths()`
+        // (that one also requires the log; here only the pidfile matters).
         Some(pid_path) => match check(pid_path) {
             LockState::Free => crate::cli::DaemonInfo::NotRunning,
             LockState::Running(pid) => crate::cli::DaemonInfo::Running {
@@ -40,14 +40,15 @@ pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
     }
 }
 
-/// `stop`: SIGTERM + espera + SIGKILL al daemon, sin tocar la BD.
+/// `stop`: SIGTERM + wait + SIGKILL the daemon, without touching the DB.
 ///
-/// - Sin `PILOTWAVE_PID_FILE` => error explícito (exit 1): sin pidfile no hay
-///   daemon que detener (usa `config.pid_file` directo, NO `paths()`,
-///   que además exigiría el log).
-/// - Pidfile sin holder vivo => `daemon: no corriendo`, exit 0 (idempotente).
-/// - La espera deriva de `task_timeout` + 5 s con suelo de 35 s (§3.9) y la
-///   fase SIGKILL espera 5 s más (ver `STOP_*`).
+/// - Without `PILOTWAVE_PID_FILE` => explicit error (exit 1): without a
+///   pidfile there is no daemon to stop (uses `config.pid_file` directly,
+///   NOT `paths()`, which would additionally require the log).
+/// - Pidfile with no live holder => `daemon: not running`, exit 0
+///   (idempotent).
+/// - The wait derives from `task_timeout` + 5 s with a 35 s floor and the
+///   SIGKILL phase waits 5 s more (see `STOP_*`).
 pub fn run_stop(config: &Config) -> Result<StopOutcome, Box<dyn std::error::Error>> {
     let Some(pid_path) = config.pid_file.as_ref() else {
         let msg = "PILOTWAVE_PID_FILE no configurado: sin pidfile no hay daemon que detener";
@@ -67,53 +68,56 @@ pub fn run_stop(config: &Config) -> Result<StopOutcome, Box<dyn std::error::Erro
     }
 }
 
-/// Resultado del padre `--bg`: idempotente si ya vive, o PID recién lanzado.
+/// Outcome of the `--bg` parent: idempotent when already alive, or a newly
+/// launched PID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgOutcome {
-    /// Sonda previa vio al dueño vivo: no se tocó nada.
+    /// A prior probe saw the owner alive: nothing was touched.
     AlreadyRunning(u32),
-    /// Hijo destacamentado recién lanzado.
+    /// Newly launched detached child.
     Started(u32),
 }
 
-/// Padre `--bg`: sonda idempotente + spawn destacamentado, sin tocar la BD.
-/// Ya vivo => no-op exit 0 (como la receta `just worker start`, §3.8).
-/// Los dirs propios se crean (0700); cualquier fallo trae ruta y causa.
+/// `--bg` parent: idempotent probe + detached spawn, without touching the DB.
+/// Already alive => no-op exit 0. Owned dirs are created (0700); any failure
+/// carries path and cause.
 pub fn run_bg_parent(
     config: &Config,
     verbose: bool,
 ) -> Result<BgOutcome, Box<dyn std::error::Error>> {
     let (pid_path, log_path) =
         paths(config).map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
-    // Sonda idempotente primero: si ya vive, no tocamos nada (cron-friendly).
+    // Idempotent probe first: when already alive, touch nothing (cron-friendly).
     if let LockState::Running(pid) = check(&pid_path) {
         return Ok(BgOutcome::AlreadyRunning(pid));
     }
-    // Preflight ANTES de spawnear: dirs propios, pidfile escribible y 0600.
-    // Sin esto el hijo arrancaba huérfano y el padre moría con `os error 2`.
+    // Preflight BEFORE spawning: owned dirs, writable pidfile, 0600.
+    // Without this the child started orphaned and the parent died with
+    // `os error 2`.
     ensure_parent_dir(&pid_path).map_err(|err| std::io::Error::other(err.to_string()))?;
     ensure_parent_dir(&log_path).map_err(|err| std::io::Error::other(err.to_string()))?;
     ensure_pid_file_writable(&pid_path).map_err(std::io::Error::other)?;
     let pid = spawn_detached(&log_path, verbose)?;
-    // El hijo re-escribe su PID al tomar el lock; esto deja el archivo listo
-    // desde ya (texto stale + unlocked = Free si el hijo no arrancara).
+    // The child rewrites its PID when taking the lock; this leaves the file
+    // ready right away (stale text + unlocked = Free when the child never
+    // starts).
     std::fs::write(&pid_path, format!("{pid}\n")).map_err(|err| {
         std::io::Error::other(format!("write pid file {}: {err}", pid_path.display()))
     })?;
     Ok(BgOutcome::Started(pid))
 }
 
-/// Espera tras SIGTERM antes de escalar a SIGKILL (§3.9: da margen al
-/// shutdown graceful; el caller suele derivarla de `task_timeout` + 5 s,
-/// con suelo de 35 s). El valor por defecto cubre el `TASK_TIMEOUT_SECS` 30.
+/// Wait after SIGTERM before escalating to SIGKILL (graceful-shutdown
+/// margin; callers usually derive it from `task_timeout` + 5 s, with a 35 s
+/// floor). The default covers a 30 s `TASK_TIMEOUT_SECS`.
 pub const STOP_TERM_TIMEOUT: Duration = Duration::from_secs(35);
-/// Espera adicional tras SIGKILL antes de rendirse con error.
+/// Additional wait after SIGKILL before giving up with an error.
 pub const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(5);
-/// Intervalo de sondeo mientras se espera que el daemon muera.
+/// Poll interval while waiting for the daemon to die.
 pub const STOP_POLL: Duration = Duration::from_millis(500);
 
-/// Rutas del daemon. Ambas deben estar configuradas (absolutas) para
-/// `--bg` / `--bg-child`; el resto de subcomandos las ignora.
+/// Daemon paths. Both must be configured (absolute) for `--bg` /
+/// `--bg-child`; every other subcommand ignores them.
 pub fn paths(config: &Config) -> Result<(PathBuf, PathBuf), String> {
     let pid = config.pid_file.clone().ok_or_else(|| {
         "PILOTWAVE_PID_FILE must be set to an absolute path to use --bg".to_owned()
@@ -124,16 +128,16 @@ pub fn paths(config: &Config) -> Result<(PathBuf, PathBuf), String> {
     Ok((pid, log))
 }
 
-/// Estado del PID file sin modificarlo (el lock, si se toma, se suelta al
-/// salir: el `File` se dropea aquí mismo).
+/// PID-file state without modifying it (a lock taken here is released on
+/// exit: the `File` drops right away).
 pub enum LockState {
-    /// Sin holder vivo (falta el archivo, texto stale, o sin lock).
+    /// No live holder (file missing, stale text, or no lock).
     Free,
-    /// Un proceso vivo tiene el lock y su cmdline coincide.
+    /// A live process holds the lock and its cmdline matches.
     Running(u32),
 }
 
-/// Sonda previa al spawn: no crea ni escribe nada.
+/// Pre-spawn probe: creates and writes nothing.
 pub fn check(path: &Path) -> LockState {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -147,12 +151,12 @@ pub fn check(path: &Path) -> LockState {
     LockState::Free
 }
 
-/// Error de [`acquire`].
+/// [`acquire`] error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AcquireError {
-    /// Otro daemon vivo tiene el lock.
+    /// Another live daemon holds the lock.
     AlreadyRunning(u32),
-    /// El archivo está bloqueado por un proceso ajeno, o fallo de E/S.
+    /// The file is locked by a foreign process, or an I/O failure.
     Io(String),
 }
 
@@ -167,9 +171,9 @@ impl std::fmt::Display for AcquireError {
     }
 }
 
-/// Toma el lock exclusivo del PID file y escribe el PID propio.
-/// Devuelve el `File` abierto: **el caller debe mantenerlo vivo** (al
-/// dropearse se suelta el lock).
+/// Take the PID file's exclusive lock and write our own PID.
+/// Return the open `File`: **the caller must keep it alive** (dropping it
+/// releases the lock).
 pub fn acquire(path: &Path) -> Result<File, AcquireError> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         ensure_dir_0700(parent)?;
@@ -206,16 +210,16 @@ pub fn acquire(path: &Path) -> Result<File, AcquireError> {
     Ok(file)
 }
 
-/// Lee el PID escrito (texto; puede ser stale). `None` si falta o es basura.
+/// Read the written PID (text; may be stale). `None` when missing or garbage.
 pub fn read_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// `true` si el proceso existe (`kill -0`, misma semántica que la receta
-/// §3.8) y su cmdline contiene `pilotwave-worker`.
+/// `true` when the process exists (`kill -0`) and its cmdline contains
+/// `pilotwave-worker`.
 pub fn is_alive_with_identity(pid: u32) -> bool {
-    // EPERM (proceso ajeno) cuenta como no-nuestro: el daemon siempre corre
-    // con nuestro usuario.
+    // EPERM (foreign process) counts as not-ours: the daemon always runs
+    // as our user.
     let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
     alive && cmdline_matches(pid)
 }
@@ -225,18 +229,18 @@ fn cmdline_matches(pid: u32) -> bool {
     identity_matches(&raw)
 }
 
-/// El nombre del binario aparece en argv[0] del cmdline (separado por NUL).
-/// Función pura para poder probarla sin `/proc`.
+/// The binary name shows up in the cmdline's argv[0] (NUL-separated).
+/// Pure function for `/proc`-free testing.
 fn identity_matches(cmdline: &[u8]) -> bool {
     let needle = b"pilotwave-worker";
     cmdline.windows(needle.len()).any(|window| window == needle)
 }
 
-/// `flock` exclusivo no bloqueante. `Ok` si se tomó; `Err(errno)` si no.
+/// Non-blocking exclusive `flock`. `Ok` when taken; `Err(errno)` when not.
 fn try_flock(file: &File) -> Result<(), libc::c_int> {
     use std::os::fd::AsRawFd;
-    // SAFETY: `flock` sobre un fd propio válido es async-signal-safe y no
-    // toca memoria ajena; el único efecto es el lock del archivo.
+    // SAFETY: `flock` on a valid owned fd is async-signal-safe and touches
+    // no foreign memory; the only effect is the file lock.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
         Ok(())
@@ -247,9 +251,9 @@ fn try_flock(file: &File) -> Result<(), libc::c_int> {
     }
 }
 
-/// Asegura el directorio padre de `path` (crea con 0700 si falta).
-/// Nunca toca permisos de dirs existentes (p. ej. `/tmp`).
-/// Los errores ya traen la ruta (`mkdir …`, `chmod …`).
+/// Ensure the parent directory of `path` (create with 0700 when missing).
+/// Never touch permissions of existing dirs (e.g. `/tmp`).
+/// Errors already carry the path (`mkdir …`, `chmod …`).
 pub fn ensure_parent_dir(path: &Path) -> Result<(), AcquireError> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         ensure_dir_0700(parent)?;
@@ -257,8 +261,8 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), AcquireError> {
     Ok(())
 }
 
-/// Causa legible para un fallo abriendo/creando `path`: qué archivo, qué
-/// operación y pista accionable (el `os error N` a secas no dice ni cuál).
+/// Human-readable cause for an open/create failure on `path`: which file,
+/// which operation and an actionable hint (a bare `os error N` says neither).
 fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind as Kind;
     let hint = match err.kind() {
@@ -271,9 +275,9 @@ fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     format!("{what} {}: {hint}: {err}", path.display())
 }
 
-/// Preflight del padre `--bg`: el PID file debe poder crearse/abrirse en
-/// lectura+escritura, ser un archivo regular y quedar en 0600.
-/// Todo fallo incluye ruta y causa accionable.
+/// `--bg` parent preflight: the PID file must be creatable/openable
+/// read+write, be a regular file and end up 0600.
+/// Every failure includes path and actionable cause.
 pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let file = OpenOptions::new()
@@ -293,7 +297,8 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    // El modo solo aplica al crear: si ya existía más abierto, endurecer.
+    // The mode only applies at creation: when pre-existing and more open,
+    // harden it.
     if meta.permissions().mode() & 0o7777 & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
             format!(
@@ -305,9 +310,8 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Crea el directorio con 0700 (como la receta §3.8). Solo aplica el chmod
-/// si el directorio no existía: nunca tocamos los permisos de dirs del
-/// sistema (p. ej. `/tmp` en tests).
+/// Create the directory with 0700. Only apply chmod when the directory did
+/// not exist: never touch permissions of system dirs (e.g. `/tmp` in tests).
 fn ensure_dir_0700(dir: &Path) -> Result<(), AcquireError> {
     use std::os::unix::fs::PermissionsExt;
     if dir.exists() {
@@ -320,32 +324,32 @@ fn ensure_dir_0700(dir: &Path) -> Result<(), AcquireError> {
     Ok(())
 }
 
-/// Resultado de [`stop_daemon`].
+/// [`stop_daemon`] outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// No había daemon vivo (pidfile ausente/stale/desbloqueado, o el PID
-    /// murió entre `check` y la señal). Idempotente: el caller sale con 0.
+    /// No daemon was alive (pidfile missing/stale/unlocked, or the PID
+    /// died between `check` and the signal). Idempotent: the caller exits 0.
     AlreadyStopped,
-    /// El daemon murió tras la señal. `forced` = hizo falta SIGKILL.
+    /// The daemon died after the signal. `forced` = SIGKILL was needed.
     Stopped { pid: u32, forced: bool },
 }
 
-/// `true` si el daemon `pid` ya no corre: lock libre O identidad perdida.
+/// `true` when the `pid` daemon no longer runs: free lock OR lost identity.
 ///
-/// La liberación del lock confirma la muerte aunque se reutilice el PID
-/// (`kill -0` solo no bastaría: otro proceso podría heredar el número).
+/// Releasing the lock confirms the death even when the PID is reused
+/// (bare `kill -0` would not suffice: another process could inherit it).
 pub fn is_stopped(path: &Path, pid: u32) -> bool {
     matches!(check(path), LockState::Free) || !is_alive_with_identity(pid)
 }
 
-/// Envía `sig` a `pid`. `Ok` si se entregó; `Err(errno)` si no.
+/// Send `sig` to `pid`. `Ok` when delivered; `Err(errno)` when not.
 ///
-/// Llamar solo tras verificar `is_alive_with_identity(pid)`: entre esa
-/// comprobación y el `kill` el proceso puede morir (ESRCH) sin que sea un
+/// Call only after checking `is_alive_with_identity(pid)`: between that
+/// check and the `kill` the process may die (ESRCH) without it being an
 /// error.
 fn send_signal(pid: u32, sig: libc::c_int) -> Result<(), libc::c_int> {
-    // SAFETY: `kill` con señal válida es async-signal-safe y no toca
-    // memoria; el PID ya pasó el identity check del caller.
+    // SAFETY: `kill` with a valid signal is async-signal-safe and touches no
+    // memory; the PID already passed the caller's identity check.
     let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
     if rc == 0 {
         Ok(())
@@ -356,10 +360,10 @@ fn send_signal(pid: u32, sig: libc::c_int) -> Result<(), libc::c_int> {
     }
 }
 
-/// Espera hasta `timeout` a que el daemon muera (ver [`is_stopped`]).
-/// `true` si paró, `false` si sigue vivo al agotar el tiempo.
+/// Wait up to `timeout` for the daemon to die (see [`is_stopped`]).
+/// `true` when stopped, `false` when still alive at timeout.
 ///
-/// Con `timeout` cero solo sondea una vez, sin dormir (útil en tests).
+/// With a zero `timeout` only probe once, without sleeping (handy in tests).
 pub fn wait_for_stop(path: &Path, pid: u32, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
@@ -373,14 +377,15 @@ pub fn wait_for_stop(path: &Path, pid: u32, timeout: Duration) -> bool {
     }
 }
 
-/// Detiene al daemon del `pid_path`: SIGTERM, espera `term_timeout`
-/// sondeando [`is_stopped`], y si sigue vivo SIGKILL + espera `kill_timeout`.
+/// Stop the `pid_path` daemon: SIGTERM, wait `term_timeout` polling
+/// [`is_stopped`], and when still alive SIGKILL + `kill_timeout` wait.
 ///
-/// - Sin holder vivo => `AlreadyStopped` (idempotente, sin señalizar).
-/// - ESRCH al señalizar => el proceso murió en carrera => `AlreadyStopped`.
-/// - EPERM => `Err` con pidfile, PID y pista (suele ser otro usuario).
-/// - Si tras SIGTERM+SIGKILL sigue vivo => `Err` con pidfile y PID.
-///   No toca la BD; el caller (`main.rs`) solo resuelve el pidfile e imprime.
+/// - No live holder => `AlreadyStopped` (idempotent, no signaling).
+/// - ESRCH while signaling => the process died in a race => `AlreadyStopped`.
+/// - EPERM => `Err` with pidfile, PID and hint (usually another user).
+/// - Still alive after SIGTERM+SIGKILL => `Err` with pidfile and PID.
+///   Never touches the DB; the caller (`main.rs`) only resolves the pidfile
+///   and prints.
 pub fn stop_daemon(
     path: &Path,
     term_timeout: Duration,
@@ -390,7 +395,8 @@ pub fn stop_daemon(
         LockState::Free => return Ok(StopOutcome::AlreadyStopped),
         LockState::Running(pid) => pid,
     };
-    // Re-verifica justo antes de señalizar: pudo morir entre `check` y aquí.
+    // Re-verify right before signaling: it may have died between `check`
+    // and here.
     if !is_alive_with_identity(pid) {
         return Ok(StopOutcome::AlreadyStopped);
     }
@@ -415,11 +421,11 @@ pub fn stop_daemon(
     if wait_for_stop(path, pid, term_timeout) {
         return Ok(StopOutcome::Stopped { pid, forced: false });
     }
-    // Sigue vivo tras el grace: SIGKILL y espera corta final.
+    // Still alive after the grace period: SIGKILL and a short final wait.
     match send_signal(pid, libc::SIGKILL) {
         Ok(()) => {}
         Err(errno) if errno == libc::ESRCH => {
-            // Murió en carrera con el SIGKILL: confirma por lock/identidad.
+            // Died racing the SIGKILL: confirm via lock/identity.
             if is_stopped(path, pid) {
                 return Ok(StopOutcome::Stopped { pid, forced: false });
             }
@@ -446,10 +452,10 @@ pub fn stop_daemon(
     ))
 }
 
-/// Lanza el hijo destacamentado: el mismo binario con `run --bg-child`,
-/// en nueva sesión (`setsid`, sobrevive al cierre del shell), stdin
-/// `/dev/null` y stdout+stderr en append al log (creado 0600).
-/// Devuelve el PID del hijo. No toca la BD: llamar antes de conectar.
+/// Launch the detached child: the same binary with `run --bg-child`, in a
+/// new session (`setsid`, survives shell exit), stdin `/dev/null` and
+/// stdout+stderr appended to the log (created 0600). Return the child PID.
+/// Never touches the DB: call before connecting.
 pub fn spawn_detached(log_path: &Path, verbose: bool) -> Result<u32, String> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -457,11 +463,10 @@ pub fn spawn_detached(log_path: &Path, verbose: bool) -> Result<u32, String> {
     if let Some(parent) = log_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         ensure_dir_0700(parent).map_err(|err| err.to_string())?;
     }
-    // `umask 0077` de la receta §3.8: el log nace 0600. El padre sale
-    // justo después del spawn, así que cambiar la máscara aquí no afecta
-    // a nada más.
-    // SAFETY: single-threaded en este punto (runtime current_thread sin
-    // tareas vivas, sin pool creado); el cambio es proceso-local.
+    // With `umask 0077` the log is born 0600. The parent exits right after
+    // the spawn, so changing the mask here affects nothing else.
+    // SAFETY: single-threaded at this point (current_thread runtime with no
+    // live tasks, no pool created); the change is process-local.
     unsafe { libc::umask(0o077) };
     let log = OpenOptions::new()
         .create(true)
@@ -479,8 +484,9 @@ pub fn spawn_detached(log_path: &Path, verbose: bool) -> Result<u32, String> {
     if verbose {
         child.arg("--verbose");
     }
-    // SAFETY: el closure corre tras `fork`, antes de `exec`, en contexto
-    // async-signal-safe; solo llama a `setsid(2)`, sin tocar memoria Rust.
+    // SAFETY: the closure runs after `fork`, before `exec`, in an
+    // async-signal-safe context; it only calls `setsid(2)`, touching no Rust
+    // memory.
     unsafe {
         child.pre_exec(|| {
             libc::setsid();
@@ -500,7 +506,7 @@ pub fn spawn_detached(log_path: &Path, verbose: bool) -> Result<u32, String> {
 mod tests {
     use super::*;
 
-    /// Archivo temporal único por test (sin `tempfile`: solo std).
+    /// Unique temp file per test (no `tempfile`: std only).
     fn tmp_pid(name: &str) -> PathBuf {
         let unique = format!(
             "pilotwave-worker-test-{}-{}-{name}.pid",
@@ -521,7 +527,7 @@ mod tests {
         ));
         assert!(!identity_matches(b"python\0db_worker\0"));
         assert!(!identity_matches(b""));
-        // Prefijo parecido no vale.
+        // A similar prefix does not count.
         assert!(!identity_matches(b"pilotwave-worke\0"));
     }
 
@@ -546,8 +552,8 @@ mod tests {
         let path = tmp_pid("acquire");
         let guard = acquire(&path).expect("primer acquire");
         assert_eq!(read_pid(&path), Some(std::process::id()));
-        // Mismo proceso, segundo fd: el lock está tomado. Si el cmdline del
-        // test contiene el nombre (típico en este checkout) vemos al dueño;
+        // Same process, second fd: the lock is held. When the test cmdline
+        // contains the name (typical in this checkout) we see the owner;
         // si no, cae al error de lock ajeno. Ambas ramas son deterministas
         // dado el entorno.
         if is_alive_with_identity(std::process::id()) {
@@ -576,14 +582,14 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // Existente más abierto => endurece a 0600 en vez de fallar.
+        // Pre-existing and more open => harden to 0600 instead of failing.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         ensure_pid_file_writable(&path).expect("endurece");
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        // Un directorio como pidfile => error explícito con la ruta.
+        // A directory as pidfile => explicit error carrying the path.
         let dir = tmp_pid("writable-dir");
         std::fs::create_dir(&dir).unwrap();
         match ensure_pid_file_writable(&dir) {
@@ -618,7 +624,7 @@ mod tests {
                 & 0o777,
             0o700
         );
-        // Existente: no lo toca aunque venga más abierto.
+        // Existing: untouched even when more open.
         std::fs::set_permissions(base.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
         ensure_parent_dir(&target).expect("no falla en existente");
         assert_eq!(
@@ -634,14 +640,14 @@ mod tests {
 
     #[test]
     fn stop_daemon_idempotente_sin_pidfile_o_stale() {
-        // Sin pidfile: nada que detener.
+        // No pidfile: nothing to stop.
         let path = tmp_pid("stop-missing");
         assert!(!path.exists());
         assert_eq!(
             stop_daemon(&path, Duration::ZERO, Duration::ZERO),
             Ok(StopOutcome::AlreadyStopped)
         );
-        // Texto válido pero sin proceso ni lock: Free => no señaliza nada.
+        // Valid text but no process or lock: Free => signal nothing.
         let path = tmp_pid("stop-stale");
         std::fs::write(&path, "999999999\n").unwrap();
         assert!(matches!(check(&path), LockState::Free));
@@ -656,8 +662,8 @@ mod tests {
     fn is_stopped_y_wait_son_true_para_pid_inexistente() {
         let path = tmp_pid("stop-falso");
         assert!(!path.exists());
-        // PID numéricamente válido pero imposible (ver test anterior):
-        // muerto sin dormir.
+        // Numerically valid but impossible PID (see previous test):
+        // dead without sleeping.
         assert!(is_stopped(&path, 999_999_999));
         assert!(wait_for_stop(&path, 999_999_999, Duration::ZERO));
         assert!(wait_for_stop(&path, 999_999_999, Duration::from_secs(5)));
@@ -665,10 +671,10 @@ mod tests {
 
     #[test]
     fn send_signal_a_pid_inexistente_devuelve_esrch() {
-        // `kill` a un PID imposible no entrega nada: solo mapea el errno.
-        // Nótese: `u32::MAX` como `pid_t` sería `-1` (broadcast a todos los
-        // procesos propios), así que se usa un PID numéricamente válido pero
-        // por encima de `pid_max` (siempre ESRCH, nunca entrega nada).
+        // `kill` on an impossible PID delivers nothing: only maps the errno.
+        // Note: `u32::MAX` as `pid_t` would be `-1` (broadcast to all our
+        // own processes), so use a numerically valid PID above `pid_max`
+        // (always ESRCH, never delivers).
         assert_eq!(send_signal(999_999_999, libc::SIGTERM), Err(libc::ESRCH));
     }
 

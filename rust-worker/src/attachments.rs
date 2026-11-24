@@ -1,37 +1,38 @@
-//! Policy de adjuntos en disco (PLAN-003 §3.4, paso B).
+//! On-disk attachment policy.
 //!
-//! `payload::parse` ya validó forma y tamaños *declarados*; aquí se valida lo
-//! *real* antes de abrir cada fichero, en este orden:
-//! 1. charset de la ruta (sin `\r \n \0`; defensa en profundidad del parse),
-//!    ruta absoluta (las relativas dependerían del cwd);
-//! 2. ningún componente es symlink (`symlink_metadata` por ancestro);
-//! 3. `canonicalize` (`ENOENT`/`EACCES` → `Missing`, resto → `PathPolicy`);
-//! 4. la ruta canonizada no cuelga de `/proc /sys /dev /etc`;
-//! 5. la ruta canonizada cuelga de alguna root canonizada;
-//! 6. tamaño real (`metadata`) dentro de caps, con total acumulado;
-//! 7. lectura con `take(MAX+1)`: si entre `stat` y `read` el fichero creció
-//!    (TOCTOU local), se rechaza en vez de cargar de más.
+//! `payload::parse` already validated the *declared* shape and sizes; here the
+//! *real* values are validated before opening each file, in this order:
+//! 1. path charset (no `\r \n \0`; defense in depth on top of parsing),
+//!    absolute path (relative ones would depend on the cwd);
+//! 2. no component is a symlink (`symlink_metadata` per ancestor);
+//! 3. `canonicalize` (`ENOENT`/`EACCES` -> `Missing`, anything else -> `PathPolicy`);
+//! 4. the canonicalized path is not under `/proc /sys /dev /etc`;
+//! 5. the canonicalized path sits under some canonicalized root;
+//! 6. real size (`metadata`) within caps, with accumulated total;
+//! 7. read with `take(MAX+1)`: when the file grew between `stat` and `read`
+//!    (local TOCTOU), it is rejected instead of loading too much.
 //!
-//! Todo es permanente: `PathPolicy` → `pilotwave_worker.path_policy_violation`,
-//! `Missing` → `pilotwave_worker.attachment_missing`. Nunca retry (§3.4, §3.6).
+//! Everything here is permanent: `PathPolicy` ->
+//! `pilotwave_worker.path_policy_violation`, `Missing` ->
+//! `pilotwave_worker.attachment_missing`. Never retried.
 //!
-//! Nota TOCTOU: el chequeo es check-then-read (best-effort). Basta porque la
-//! amenaza es una fila plantada en BD, no un proceso local corriendo carreras
-//! contra el worker; un atacante con ejecución local ya tiene el FS.
+//! TOCTOU note: the check is check-then-read (best-effort). That is enough
+//! because the threat is a planted DB row, not a local process racing the
+//! worker; an attacker with local execution already owns the FS.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::contract::{MAX_FILE_BYTES, MAX_TOTAL_BYTES};
 
-/// Fichero listo para adjuntar: nombre base + bytes ya acotados.
+/// File ready to attach: base name + already-bounded bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentFile {
     pub filename: String,
     pub bytes: Vec<u8>,
 }
 
-/// Error de policy ya clasificado según §3.4/§3.6.
+/// Already-classified policy error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
     /// `pilotwave_worker.path_policy_violation`.
@@ -55,12 +56,12 @@ impl AttachError {
     }
 }
 
-/// Directorios sensibles: denegados aunque una root mal configurada los
-/// incluyera (defensa en profundidad, §3.4c).
+/// Sensitive directories: denied even when a misconfigured root would
+/// include them (defense in depth).
 const DENIED_PREFIXES: &[&str] = &["/proc", "/sys", "/dev", "/etc"];
 
-/// Carga y valida todos los adjuntos. `paths` viene de `EmailContent` (ya
-/// validado en forma por `payload::parse`).
+/// Load and validate every attachment. `paths` comes from `EmailContent`
+/// (shape already validated by `payload::parse`).
 pub fn load(roots: &[PathBuf], paths: &[String]) -> Result<Vec<AttachmentFile>, AttachError> {
     let canon_roots = canonicalize_roots(roots);
     let mut files = Vec::with_capacity(paths.len());
@@ -125,7 +126,7 @@ pub fn load(roots: &[PathBuf], paths: &[String]) -> Result<Vec<AttachmentFile>, 
             .ok_or_else(|| AttachError::PathPolicy(format!("attachment[{index}]: no file name")))?
             .to_owned();
 
-        // `take` + 1: si el fichero creció tras el `stat`, se detecta aquí.
+        // `take` + 1: when the file grew after `stat`, it is detected here.
         let mut bytes = Vec::new();
         std::fs::File::open(&canon)
             .map_err(|err| {
@@ -162,9 +163,9 @@ pub fn load(roots: &[PathBuf], paths: &[String]) -> Result<Vec<AttachmentFile>, 
     Ok(files)
 }
 
-/// Rechaza si la ruta o cualquiera de sus ancestros es un symlink. Un
-/// ancestro inexistente no es symlink: se deja al `canonicalize` posterior
-/// (que lo clasificará como `Missing`).
+/// Reject when the path or any of its ancestors is a symlink. A missing
+/// ancestor is not a symlink: leave it to the later `canonicalize`
+/// (which will classify it as `Missing`).
 fn reject_symlink_components(path: &Path, index: usize) -> Result<(), AttachError> {
     for ancestor in path.ancestors() {
         match std::fs::symlink_metadata(ancestor) {
@@ -221,8 +222,8 @@ fn require_root_prefix(
     )))
 }
 
-/// Canoniza las roots; las inexistentes se descartan (entonces ningún fichero
-/// matchea: deny-all). Nunca falla: una configuración rota deniega, no abre.
+/// Canonicalize the roots; missing ones are dropped (then no file matches:
+/// deny-all). Never fails: a broken configuration denies, never opens.
 fn canonicalize_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots
         .iter()
@@ -235,7 +236,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Directorio temporal único sin dependencias extra.
+    /// Unique temp dir with no extra dependencies.
     fn tempdir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -364,8 +365,8 @@ mod tests {
     fn real_size_over_cap_is_rejected() {
         let root = tempdir("big");
         let p = write(&root, "g.pdf", b"declaro poco");
-        // Declared sizes ya no viajan hasta aquí: lo real manda. Simular
-        // fichero grande sin escribir 6 MB: truncar con sparse.
+        // Declared sizes never reach this point: real bytes rule. Simulate
+        // a big file without writing 6 MB: truncate sparse.
         let big = root.join("big.bin");
         let f = std::fs::File::create(&big).unwrap();
         f.set_len(MAX_FILE_BYTES + 1).unwrap();

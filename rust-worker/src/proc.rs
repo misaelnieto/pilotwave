@@ -1,61 +1,61 @@
-//! Lecturas best-effort de `/proc` para la sección daemon de `status`.
+//! Best-effort `/proc` reads for the `status` daemon section.
 //!
-//! v1 sin CPU (decisión de usuario): solo PID, uptime y RAM (VmRSS).
-//! Todo lo que toca `/proc` devuelve `Option` (`None` = ilegible o
-//! truncado; el caller pinta `n/a` y sigue con exit 0). Las funciones
-//! `parse_*` son puras para poder probarlas sin `/proc`.
+//! No CPU in v1: PID, uptime and RAM (VmRSS) only.
+//! Everything touching `/proc` returns `Option` (`None` = unreadable or
+//! truncated; the caller renders `n/a` and carries on with exit 0). The
+//! `parse_*` functions are pure for `/proc`-free testing.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// VmRSS del proceso en kB (`/proc/<pid>/status`, línea `VmRSS: <n> kB`).
-/// `None` si el archivo falta, es ilegible o no trae la línea.
+/// Process VmRSS in kB (`/proc/<pid>/status`, `VmRSS: <n> kB` line).
+/// `None` when the file is missing, unreadable or lacks the line.
 pub fn read_vmrss_kb(pid: u32) -> Option<u64> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     parse_vmrss_kb(&text)
 }
 
-/// Función pura tras la lectura: busca `VmRSS: <n> kB`.
+/// Pure function after reading: find `VmRSS: <n> kB`.
 pub(crate) fn parse_vmrss_kb(text: &str) -> Option<u64> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            // `VmRSS:` aparece una sola vez en `/proc/<pid>/status`; si su
-            // número no parsea, el archivo está truncado => None.
+            // `VmRSS:` shows up once in `/proc/<pid>/status`; when its
+            // number does not parse, the file is truncated => None.
             return rest.split_whitespace().next()?.parse::<u64>().ok();
         }
     }
     None
 }
 
-/// Campo `starttime` (n.º 22) de `/proc/<pid>/stat`, en ticks de reloj
-/// desde el arranque. `None` si el archivo falta o está truncado.
+/// `starttime` field (no. 22) of `/proc/<pid>/stat`, in clock ticks since
+/// boot. `None` when the file is missing or truncated.
 ///
-/// OJO: `comm` (campo 2, entre paréntesis) puede contener espacios y
-/// paréntesis; por eso se busca el ÚLTIMO `)` y se cuenta desde ahí
-/// (starttime = campo 22 global = índice 20 tras `)`).
+/// NOTE: `comm` (field 2, in parentheses) may contain spaces and
+/// parentheses; hence the LAST `)` is located and counting starts there
+/// (starttime = global field 22 = index 20 after `)`).
 pub fn read_starttime_ticks(pid: u32) -> Option<u64> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_starttime_ticks(&text)
 }
 
-/// Función pura tras la lectura.
+/// Pure function after reading.
 pub(crate) fn parse_starttime_ticks(text: &str) -> Option<u64> {
     let after = text.rfind(')')?;
     let fields: Vec<&str> = text[after + 1..].split_whitespace().collect();
-    // Campos 3..=22 tras `)`: 20 tokens; starttime es el último (índice 19).
+    // Fields 3..=22 after `)`: 20 tokens; starttime is the last one (index 19).
     if fields.len() < 20 {
         return None;
     }
     fields[19].parse::<u64>().ok()
 }
 
-/// Segundos epoch del arranque (`/proc/stat`, línea `btime <n>`).
-/// `None` si el archivo falta o no trae la línea.
+/// Boot epoch seconds (`/proc/stat`, `btime <n>` line).
+/// `None` when the file is missing or lacks the line.
 pub fn boot_time_secs() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/stat").ok()?;
     parse_boot_time(&text)
 }
 
-/// Función pura tras la lectura.
+/// Pure function after reading.
 pub(crate) fn parse_boot_time(text: &str) -> Option<u64> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("btime ") {
@@ -65,15 +65,15 @@ pub(crate) fn parse_boot_time(text: &str) -> Option<u64> {
     None
 }
 
-/// Ticks de reloj por segundo (`sysconf(_SC_CLK_TCK)`); 100 si falla.
+/// Clock ticks per second (`sysconf(_SC_CLK_TCK)`); 100 on failure.
 pub fn clk_ticks_per_sec() -> u64 {
-    // SAFETY: `sysconf` con `_SC_CLK_TCK` es pura consulta, sin efectos.
+    // SAFETY: `sysconf` with `_SC_CLK_TCK` is a pure query, no side effects.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if hz <= 0 { 100 } else { hz as u64 }
 }
 
-/// Segundos desde que arrancó `pid`: `now - (btime + starttime/hz)`.
-/// Saturante; `None` si cualquier lectura falla (best-effort => `n/a`).
+/// Seconds since `pid` started: `now - (btime + starttime/hz)`.
+/// Saturating; `None` when any read fails (best-effort => `n/a`).
 pub fn uptime_secs(pid: u32) -> Option<u64> {
     let start_ticks = read_starttime_ticks(pid)?;
     let boot = boot_time_secs()?;
@@ -82,7 +82,7 @@ pub fn uptime_secs(pid: u32) -> Option<u64> {
     Some(now.saturating_sub(start_epoch))
 }
 
-/// `45s` / `2m5s` / `1h2m3s` (`3d1h2m3s` si aplica). Sin dependencias.
+/// `45s` / `2m5s` / `1h2m3s` (`3d1h2m3s` when it applies). No dependencies.
 pub fn format_uptime(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3_600;
@@ -102,7 +102,7 @@ pub fn format_uptime(secs: u64) -> String {
     out
 }
 
-/// `4192 kB (4.1 MB)`: entero exacto + decimal aproximado.
+/// `4192 kB (4.1 MB)`: exact integer + approximate decimal.
 pub fn format_rss(kb: u64) -> String {
     format!("{kb} kB ({:.1} MB)", kb as f64 / 1024.0)
 }
@@ -124,14 +124,14 @@ mod tests {
 
     #[test]
     fn starttime_cuenta_desde_el_ultimo_parentesis() {
-        // Campos 3..=22 tras `)`: starttime (22) = token 20 => valor 2200.
+        // Fields 3..=22 after `)`: starttime (22) = token 20 => value 2200.
         let after: Vec<String> = (3..=22).map(|n| (n * 100).to_string()).collect();
         let stat = format!("1234 (worker) {}", after.join(" "));
         assert_eq!(parse_starttime_ticks(&stat), Some(2200));
-        // comm con espacios y paréntesis: solo el ÚLTIMO `)` vale.
+        // comm with spaces and parentheses: only the LAST `)` counts.
         let stat = format!("1234 (my app (test) v2) {}", after.join(" "));
         assert_eq!(parse_starttime_ticks(&stat), Some(2200));
-        // Truncado (menos de 20 tokens tras `)`): None, no panic.
+        // Truncated (fewer than 20 tokens after `)`): None, no panic.
         assert_eq!(parse_starttime_ticks("1234 (x) R 1 2"), None);
         assert_eq!(parse_starttime_ticks("sin parentesis"), None);
     }
@@ -167,7 +167,7 @@ mod tests {
         assert!(read_starttime_ticks(pid).is_some());
         assert!(boot_time_secs().is_some());
         assert!(clk_ticks_per_sec() > 0);
-        // Recién arrancado en el test: uptime pequeño pero definido.
+        // Just started in the test: small but defined uptime.
         assert!(uptime_secs(pid).is_some());
     }
 

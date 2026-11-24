@@ -1,7 +1,6 @@
-//! Alcance de cola (Value Object).
+//! Queue scope (value object).
 //!
-//! Port del prototipo: cola + backend + allowlist extraidos una vez y
-//! reutilizados en cada query.
+//! Queue + backend + allowlist extracted once and reused in every query.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueScope {

@@ -1,6 +1,6 @@
 //! Runtime configuration.
 //!
-//! PLAN-003 §3.8/§3.12: the sidecar parses `repo/.env` itself, but **only**
+//! The sidecar parses `repo/.env` itself, but **only**
 //! copies the variables it needs. We deliberately avoid `dotenvy::dotenv()`,
 //! which would load the whole file (SECRET_KEY, IMAP_*, TURNSTILE_*, ...) into
 //! the process environment and therefore into `/proc/<pid>/environ`.
@@ -13,12 +13,12 @@ use std::time::Duration;
 /// The `.env` file, parsed into memory but never exported to the environment.
 pub struct Env {
     values: Vec<(String, String)>,
-    /// Lee el entorno real del proceso antes que los valores de `.env`.
-    /// Producción: `true` (entorno real > `.env` > default).
-    /// Tests: `false` (herméticos: `cargo test` corre en hilos paralelos y
-    /// `just test` exporta `.env` vía `dotenv-load`; sin esto el `.env` real
-    /// ganaría a los valores en memoria y los tests dejarían de ser
-    /// deterministas).
+    /// Read the real process environment before `.env` values.
+    /// Production: `true` (real env > `.env` > default).
+    /// Tests: `false` (hermetic: `cargo test` runs threads in parallel and
+    /// `just test` exports `.env` via `dotenv-load`; otherwise the real
+    /// `.env` would win over in-memory values and tests would stop being
+    /// deterministic).
     read_process_env: bool,
 }
 
@@ -70,7 +70,7 @@ impl Env {
         }
     }
 
-    /// Booleano estilo `django-environ`: insensible a caso.
+    /// `django-environ`-style boolean: case-insensitive.
     fn boolean(&self, name: &str, default: bool) -> Result<bool, String> {
         match self.get(name) {
             Some(raw) => match raw.to_ascii_lowercase().as_str() {
@@ -85,13 +85,12 @@ impl Env {
 
 /// Everything the worker needs to run.
 ///
-/// `smtp_password` se redacta en `Debug`: ni logs ni panics deben exponerlo
-/// (PLAN-003 §3.8).
+/// `smtp_password` is redacted in `Debug`: neither logs nor panics expose it.
 pub struct Config {
     /// Least-privilege DSN (`aiph_worker` role), never the app's `DATABASE_URL`.
     pub database_url: String,
-    /// DSN de solo lectura para el CLI (`status`/`list`/`inspect`, R-7).
-    /// `PILOTWAVE_DATABASE_URL_RO`, ausente/vacío => se usa `database_url`.
+    /// Read-only DSN for the CLI (`status`/`list`/`inspect`, see roadmap R-7).
+    /// `PILOTWAVE_DATABASE_URL_RO`; absent/empty falls back to `database_url`.
     pub database_url_ro: Option<String>,
     /// Value appended to `worker_ids` on every claim; `[A-Za-z0-9_-]{1,64}`.
     pub worker_id: String,
@@ -101,11 +100,11 @@ pub struct Config {
     pub task_paths: Vec<String>,
     pub poll_min: Duration,
     pub poll_max: Duration,
-    /// Per-send SMTP ceiling (§3.6 `TASK_TIMEOUT_SECS`).
+    /// Per-send SMTP ceiling (`TASK_TIMEOUT_SECS`).
     pub task_timeout: Duration,
-    /// `len(worker_ids)` cap: a partir de aquí el transitorio es `FAILED` (§3.6).
+    /// `len(worker_ids)` cap: past this point a transient becomes `FAILED`.
     pub max_attempts: usize,
-    /// Autoreciclaje (§3.8): salir con exit 75 tras procesar N tareas.
+    /// Self-recycling: exit 75 after processing N tasks.
     /// `PILOTWAVE_RECYCLE_N`, default 5000.
     pub recycle_n: u64,
     pub smtp_host: String,
@@ -113,21 +112,21 @@ pub struct Config {
     pub smtp_use_tls: bool,
     pub smtp_user: String,
     pub smtp_password: String,
-    /// Prefijos permitidos para adjuntos (§3.4). Fail-closed: si no hay
-    /// `PILOTWAVE_ATTACHMENT_ROOTS`, la lista queda vacía y el paso B
-    /// rechazará todo archivo. Sin fallback a `MEDIA_ROOT` (ni en dev):
-    /// configurarla es responsabilidad del Developer/Integrador.
+    /// Allowed prefixes for attachments. Fail-closed: without
+    /// `PILOTWAVE_ATTACHMENT_ROOTS` the list is empty and every file send
+    /// is rejected. No `MEDIA_ROOT` fallback (not even in dev):
+    /// wiring explicit roots is the Developer/Integrator's responsibility.
     pub attachment_roots: Vec<PathBuf>,
-    /// Sender identity; parsed at startup so a bad value fails loud (§3.12).
+    /// Sender identity; parsed at startup so a bad value fails loud.
     pub from: lettre::message::Mailbox,
-    /// Salta la verificacion de least-privilege al arrancar
-    /// (`PILOTWAVE_SKIP_GRANT_CHECK`, default `false`). Solo para sondas
-    /// ad-hoc; en produccion el check va activado (audit 001 §A07, R-6).
+    /// Skip the least-privilege check at startup
+    /// (`PILOTWAVE_SKIP_GRANT_CHECK`, default `false`). Only for ad-hoc
+    /// probes; keep the check enabled in production (see roadmap R-6).
     pub skip_grant_check: bool,
-    /// PID file del daemon `--bg` (§3.8). Solo lo exigen `--bg`/`--bg-child`;
-    /// el resto de subcomandos lo ignora. Debe ser ruta absoluta.
+    /// PID file of the `--bg` daemon. Only `--bg`/`--bg-child` require it;
+    /// other subcommands ignore it. Must be an absolute path.
     pub pid_file: Option<PathBuf>,
-    /// Log del daemon `--bg` (stdout+stderr del hijo, append). Igual que arriba.
+    /// Log file of the `--bg` daemon (child stdout+stderr, append). Same as above.
     pub log_file: Option<PathBuf>,
 }
 
@@ -163,8 +162,8 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// DSN para los subcomandos de solo lectura (`status`/`list`/`inspect`,
-    /// R-7): el rol de lectura si está configurado, si no el DSN del worker.
+    /// DSN for the read-only subcommands (`status`/`list`/`inspect`,
+    /// roadmap R-7): the reader role when configured, else the worker DSN.
     pub fn read_database_url(&self) -> &str {
         self.database_url_ro
             .as_deref()
@@ -173,14 +172,13 @@ impl Config {
 
     pub fn from_env(env: &Env) -> Result<Self, String> {
         let database_url = env.required("PILOTWAVE_DATABASE_URL")?;
-        // Opcional: vacío o ausente => `None` (el CLI reutiliza `database_url`).
+        // Optional: empty or absent => `None` (the CLI reuses `database_url`).
         let database_url_ro = env
             .get("PILOTWAVE_DATABASE_URL_RO")
             .filter(|v| !v.trim().is_empty());
-        // A02 (audit 001): exige `sslmode=require` fuera de loopback. El
-        // loopback (localhost/dev) se permite con WARNING explícito; el
-        // resto falla alto para no mandar credenciales en claro.
-        // A02 (audit 001): require `sslmode=require` outside loopback.
+        // Security: require `sslmode=require` outside loopback. Loopback
+        // (localhost/dev) is allowed with an explicit WARNING; anything
+        // else fails loud so credentials never travel in cleartext.
         if !dsn_requires_ssl(&database_url) {
             if dsn_host_is_loopback(&database_url) {
                 eprintln!(
@@ -211,7 +209,7 @@ impl Config {
         }
 
         // A stable, safe id: it is written into jsonb and into logs, so no
-        // quotes, spaces or slashes are allowed (PLAN-003 §3.10).
+        // quotes, spaces or slashes are allowed.
         let worker_id = env
             .get("PILOTWAVE_ID")
             .unwrap_or_else(|| format!("pilotwave-{}", std::process::id()));
@@ -250,10 +248,9 @@ impl Config {
             return Err("EMAIL_PORT must be a TCP port (1-65535), got 0".into());
         }
         let smtp_use_tls = env.boolean("EMAIL_USE_TLS", true)?;
-        // A02 (audit 001): `builder_dangerous` (sin TLS) solo con opt-in
-        // explícito. Sin `PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true` falla alto:
-        // las credenciales SMTP viajarían en claro. Solo dev, jamás en prod.
-        // Plaintext SMTP only with explicit opt-in; otherwise fail loud.
+        // Plaintext SMTP only with explicit opt-in; otherwise fail loud:
+        // without `PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true` fail startup
+        // (SMTP credentials would travel in cleartext). Dev-only, never prod.
         if !smtp_use_tls {
             if !env.boolean("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", false)? {
                 return Err("EMAIL_USE_TLS=false sends SMTP credentials in cleartext; \
@@ -269,13 +266,13 @@ impl Config {
         }
         let smtp_user = env.required("EMAIL_HOST_USER")?;
         let smtp_password = env.required("EMAIL_HOST_PASSWORD")?;
-        // §3.12/§3.4: lista separada por comas desde
-        // `PILOTWAVE_ATTACHMENT_ROOTS`. Sin fallback a `MEDIA_ROOT` ni
-        // siquiera en dev: vacio = denegar todo (fail-closed). Es
-        // responsabilidad del Developer/Integrador configurar las roots
-        // explicitas (ver docs de instalacion). No se canoniza aqui: los
-        // directorios pueden no existir en tests; el paso B canoniza
-        // `root` + candidato antes de comparar prefijos.
+        // Comma-separated list from `PILOTWAVE_ATTACHMENT_ROOTS`. No
+        // `MEDIA_ROOT` fallback, not even in dev: empty means deny-all
+        // (fail-closed). Wiring explicit roots is the
+        // Developer/Integrator's responsibility (see install docs). Not
+        // canonicalized here: directories may not exist in tests; the
+        // attachment loader canonicalizes `root` + candidate before
+        // comparing prefixes.
         let attachment_roots: Vec<PathBuf> = match env.get("PILOTWAVE_ATTACHMENT_ROOTS") {
             Some(raw) => raw
                 .split(',')
@@ -292,9 +289,9 @@ impl Config {
                  Wiring explicit absolute roots is the Developer/Integrator's responsibility."
             );
         }
-        // Una root relativa se resolvería contra el cwd del proceso: ante
-        // cualquier `starts_with` posterior sería deny-all silencioso o, peor,
-        // dependiente del cwd. Falla alto en startup (§3.4).
+        // A relative root would resolve against the process cwd: any later
+        // `starts_with` check would silently deny-all or, worse, depend on
+        // the cwd. Fail loud at startup.
         if attachment_roots.iter().any(|r| !r.is_absolute()) {
             return Err("PILOTWAVE_ATTACHMENT_ROOTS must be absolute paths".into());
         }
@@ -302,8 +299,8 @@ impl Config {
             .required("DEFAULT_FROM_EMAIL")?
             .parse::<lettre::message::Mailbox>()
             .map_err(|err| format!("DEFAULT_FROM_EMAIL must parse as a mailbox, got: {err}"))?;
-        // Solo `--bg`/`--bg-child` las exigen (vía `daemon::paths`): el resto
-        // de subcomandos funciona sin ellas. Absolutas o nada (§3.8).
+        // Only `--bg`/`--bg-child` require them (via `daemon::paths`): the
+        // rest of the subcommands work without them. Absolute or nothing.
         let pid_file = optional_absolute(env, "PILOTWAVE_PID_FILE")?;
         let log_file = optional_absolute(env, "PILOTWAVE_LOG_FILE")?;
         let skip_grant_check = env.boolean("PILOTWAVE_SKIP_GRANT_CHECK", false)?;
@@ -334,7 +331,6 @@ impl Config {
     }
 }
 
-/// `true` si la query del DSN trae `sslmode=require` (insensible a caso).
 /// `true` when the DSN query carries `sslmode=require` (case-insensitive).
 fn dsn_requires_ssl(url: &str) -> bool {
     let query = match url.split_once('?') {
@@ -348,7 +344,6 @@ fn dsn_requires_ssl(url: &str) -> bool {
     })
 }
 
-/// Host del DSN (sin userinfo ni puerto) para el bypass de loopback.
 /// DSN host (no userinfo, no port) for the loopback bypass.
 fn dsn_host(url: &str) -> &str {
     let after_scheme = url.split("://").nth(1).unwrap_or(url);
@@ -363,15 +358,14 @@ fn dsn_host(url: &str) -> &str {
     }
 }
 
-/// Solo loopback (`localhost`, `127.*`, `::1`): único caso sin TLS (dev).
 /// Loopback only: the single no-TLS case (dev).
 fn dsn_host_is_loopback(url: &str) -> bool {
     let host = dsn_host(url).to_ascii_lowercase();
     host == "localhost" || host == "::1" || host.starts_with("127.")
 }
 
-/// Variable opcional de ruta absoluta: ausente/vacía => `None`;
-/// presente pero relativa => error alto (fail-closed, §3.8).
+/// Optional absolute-path variable: absent/empty => `None`;
+/// present but relative => loud error (fail-closed).
 fn optional_absolute(env: &Env, name: &str) -> Result<Option<PathBuf>, String> {
     match env.get(name) {
         None => Ok(None),
@@ -390,7 +384,7 @@ fn optional_absolute(env: &Env, name: &str) -> Result<Option<PathBuf>, String> {
 mod tests {
     use super::*;
 
-    /// `Env` mínimo válido, en memoria (nunca toca el entorno real).
+    /// Minimal valid in-memory `Env` (never touches the real environment).
     fn base_vars() -> Vec<(&'static str, &'static str)> {
         vec![
             ("PILOTWAVE_DATABASE_URL", "postgres://u:p@127.0.0.1/db"),
@@ -402,11 +396,11 @@ mod tests {
         ]
     }
 
-    /// `Env` en memoria: hermético, sin leer el entorno real del proceso
-    /// (`read_process_env = false`). Los tests corren en hilos paralelos y
-    /// `set_var`/`remove_var` no son thread-safe; además `just test` exporta
-    /// el `.env` real vía `dotenv-load`, que de otro modo ganaría a estos
-    /// valores y haría los tests no deterministas.
+    /// In-memory `Env`: hermetic, never reads the real process environment
+    /// (`read_process_env = false`). Tests run in parallel threads and
+    /// `set_var`/`remove_var` are not thread-safe; plus `just test` exports
+    /// the real `.env` via `dotenv-load`, which would otherwise win over
+    /// these values and make tests non-deterministic.
     fn test_env(extra: &[(&str, &str)]) -> Env {
         let values = base_vars()
             .into_iter()
@@ -431,7 +425,7 @@ mod tests {
         assert_eq!(cfg.smtp_host, "smtp.example.com");
         assert_eq!(cfg.task_timeout, Duration::from_secs(30));
         assert_eq!(cfg.from.email.to_string(), "crm@example.com");
-        // Fail-closed: sin ninguna var, la lista queda vacía (deniega todo).
+        // Fail-closed: with no vars set, the list is empty (denies everything).
         assert!(cfg.attachment_roots.is_empty());
     }
 
@@ -464,9 +458,9 @@ mod tests {
 
     #[test]
     fn requeridos_y_rangos_fallan_alto() {
-        // FROM malformado.
+        // Malformed FROM.
         assert!(config_with(&[("DEFAULT_FROM_EMAIL", "not-an-email@@")]).is_err());
-        // Password ausente.
+        // Missing password.
         let values = base_vars()
             .into_iter()
             .filter(|(k, _)| *k != "EMAIL_HOST_PASSWORD")
@@ -479,7 +473,7 @@ mod tests {
             })
             .is_err()
         );
-        // Puerto cero o basura.
+        // Zero or garbage port.
         assert!(config_with(&[("EMAIL_PORT", "0")]).is_err());
         assert!(config_with(&[("EMAIL_PORT", "xx")]).is_err());
         // Poll min > max.
@@ -524,14 +518,14 @@ mod tests {
 
     #[test]
     fn ro_opcional_para_cli_solo_lectura() {
-        // Ausente => None y el CLI reutiliza el DSN del worker.
+        // Absent => None and the CLI reuses the worker DSN.
         let cfg = config_with(&[]).unwrap();
         assert_eq!(cfg.database_url_ro, None);
         assert_eq!(cfg.read_database_url(), cfg.database_url.as_str());
-        // Vacío => None (sin error).
+        // Empty => None (no error).
         let cfg = config_with(&[("PILOTWAVE_DATABASE_URL_RO", "  ")]).unwrap();
         assert_eq!(cfg.database_url_ro, None);
-        // Presente => el CLI de solo lectura usa el rol de lectura.
+        // Present => the read-only CLI uses the reader role.
         let cfg = config_with(&[(
             "PILOTWAVE_DATABASE_URL_RO",
             "postgres://reader:lector@127.0.0.1/db",
@@ -545,16 +539,16 @@ mod tests {
             cfg.read_database_url(),
             "postgres://reader:lector@127.0.0.1/db"
         );
-        // Ni el DSN de lectura sale en el Debug.
+        // The reader DSN never shows up in Debug either.
         let shown = format!("{cfg:?}");
         assert!(!shown.contains("lector"));
     }
 
     #[test]
     fn attachment_roots_sin_fallback_y_relativas_fallan() {
-        // Sin la var: vacio = denegar todo (fail-closed). Sin fallback a
-        // MEDIA_ROOT ni siquiera en dev: es responsabilidad del
-        // Developer/Integrador configurar roots explicitas.
+        // Without the var: empty = deny-all (fail-closed). No MEDIA_ROOT
+        // fallback, not even in dev: wiring explicit roots is the
+        // Developer/Integrator's responsibility.
         assert!(config_with(&[]).unwrap().attachment_roots.is_empty());
         assert!(
             config_with(&[("MEDIA_ROOT", "/srv/media")])
@@ -562,25 +556,25 @@ mod tests {
                 .attachment_roots
                 .is_empty()
         );
-        // Lista explicita.
+        // Explicit list.
         let cfg = config_with(&[("PILOTWAVE_ATTACHMENT_ROOTS", "/a, /b ,")]).unwrap();
         assert_eq!(
             cfg.attachment_roots,
             vec![PathBuf::from("/a"), PathBuf::from("/b")]
         );
-        // Relativas: fallo alto.
+        // Relative paths: loud failure.
         assert!(config_with(&[("PILOTWAVE_ATTACHMENT_ROOTS", "media/x")]).is_err());
     }
 
     #[test]
     fn dsn_sin_sslmode_solo_loopback_con_warning() {
-        // Loopback sin sslmode: pasa (bypass dev con WARNING en stderr).
+        // Loopback without sslmode: passes (dev bypass with WARNING on stderr).
         assert!(config_with(&[]).is_ok());
-        // Remoto sin sslmode: falla alto (A02).
+        // Remote without sslmode: loud failure.
         assert!(
             config_with(&[("PILOTWAVE_DATABASE_URL", "postgres://u:p@db.example.com/db")]).is_err()
         );
-        // Remoto con sslmode=require: pasa (también variante `&` y mayúsculas).
+        // Remote with sslmode=require: passes (also `&` and uppercase variants).
         assert!(
             config_with(&[(
                 "PILOTWAVE_DATABASE_URL",
@@ -595,7 +589,7 @@ mod tests {
             )])
             .is_ok()
         );
-        // `sslmode=disable` remoto: falla alto (no es `require`).
+        // Remote `sslmode=disable`: loud failure (not `require`).
         assert!(
             config_with(&[(
                 "PILOTWAVE_DATABASE_URL",
@@ -603,7 +597,7 @@ mod tests {
             )])
             .is_err()
         );
-        // Loopback con puerto y con IPv6: el bypass sigue aplicando.
+        // Loopback with port and IPv6: the bypass still applies.
         assert!(
             config_with(&[("PILOTWAVE_DATABASE_URL", "postgres://u:p@localhost:5432/db")]).is_ok()
         );
@@ -612,17 +606,16 @@ mod tests {
 
     #[test]
     fn smtp_sin_tls_exige_opt_in_explicito() {
-        // Sin TLS y sin opt-in: falla alto (antes era `builder_dangerous`
-        // silencioso, A02).
+        // No TLS and no opt-in: loud failure (plaintext was never silent).
         assert!(config_with(&[("EMAIL_USE_TLS", "false")]).is_err());
-        // Con opt-in explícito: pasa pero sin TLS (solo dev).
+        // With explicit opt-in: passes but without TLS (dev-only).
         let cfg = config_with(&[
             ("EMAIL_USE_TLS", "false"),
             ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
         ])
         .unwrap();
         assert!(!cfg.smtp_use_tls);
-        // Por defecto sigue siendo TLS.
+        // TLS stays the default.
         assert!(config_with(&[]).unwrap().smtp_use_tls);
     }
 
@@ -650,7 +643,7 @@ mod tests {
 
     #[test]
     fn skip_grant_check_default_off_y_acepta_opt_in() {
-        // R-6: el check de least-privilege va activado por defecto.
+        // The least-privilege check (roadmap R-6) is on by default.
         assert!(!config_with(&[]).unwrap().skip_grant_check);
         assert!(
             config_with(&[("PILOTWAVE_SKIP_GRANT_CHECK", "true")])

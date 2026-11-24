@@ -1,9 +1,9 @@
-//! Lógica del worker: reclamación, procesado y loops (§3.4, §3.6, §3.7, §3.11).
+//! Worker logic: claim, processing and loops.
 //!
-//! `main.rs` queda como bootstrap fino (parse, config, despacho sin BD) y
-//! delega aquí para oneshot (`status`/`inspect`/`list`/`run` único) y loop
-//! (`run --fg` / `run --bg-child`). Sin cambiar mensajes, exit codes ni
-//! stdout/stderr.
+//! `main.rs` stays a thin bootstrap (parse, config, dispatch without DB)
+//! and delegates here for oneshots (`status`/`inspect`/`list`/single `run`)
+//! and loops (`run --fg` / `run --bg-child`). Messages, exit codes and
+//! stdout/stderr stay unchanged.
 
 use std::time::Duration;
 
@@ -19,49 +19,49 @@ use crate::logging;
 use crate::mailer;
 use crate::retry;
 
-/// Resultado unificado del worker (errores ya impresos por el caller).
+/// Unified worker result (errors already printed by the caller).
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Error `InvalidInput` boxeado (inspect/claim con id inválido, rutas del
-/// daemon sin configurar). Centraliza los 3-4 `io::Error(InvalidInput)`.
+/// Boxed `InvalidInput` error (inspect/claim with invalid id, unconfigured
+/// daemon paths). Centralizes the `io::Error(InvalidInput)` sites.
 pub fn invalid_input(msg: String) -> Box<dyn std::error::Error> {
     Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))
         as Box<dyn std::error::Error>
 }
 
-/// Edad máxima del daemon antes del autoreciclaje (§3.8): 7 días.
-/// Se combina con `PILOTWAVE_RECYCLE_N` (por tareas); el que llegue primero gana.
+/// Maximum daemon age before self-recycling: 7 days.
+/// Combined with `PILOTWAVE_RECYCLE_N` (by tasks); whichever hits first wins.
 const RECYCLE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Cómo terminó el loop persistente (§3.9): apagado limpio (exit 0) o
-/// autoreciclaje (exit 75, el keep-alive reinicia sin alerta).
+/// How the persistent loop ended: clean shutdown (exit 0) or
+/// self-recycle (exit 75, the keep-alive restarts without alerting).
 pub enum LoopEnd {
     Shutdown,
     Recycle,
 }
 
-/// Lo que un ciclo aporta al heartbeat (§3.10): id de la tarea tocada,
-/// su código de fallo (`None` si éxito o reencolado limpio... en la
-/// práctica el transitorio también deja código, ver `handle_claimed`) y
-/// la profundidad vista (para `queue_depth_seen`).
+/// What one cycle contributes to the heartbeat: id of the touched task,
+/// its failure code (`None` on success or clean requeue -- in practice a
+/// transient also leaves a code, see `handle_claimed`) and the observed
+/// depth (for `queue_depth_seen`).
 pub(crate) struct CycleBeat {
     pub task_id: String,
     pub error_code: Option<String>,
     pub queue_depth_seen: i64,
 }
 
-/// Autoreciclaje por número de tareas (§3.8). Función pura, testeable.
+/// Self-recycling by task count. Pure function, testable.
 pub(crate) fn should_recycle_tasks(processed: u64, recycle_n: u64) -> bool {
     processed >= recycle_n
 }
 
-/// Autoreciclaje por antigüedad (§3.8, 7 días). Función pura, testeable.
+/// Self-recycling by age (7 days). Pure function, testable.
 pub(crate) fn should_recycle_age(uptime: Duration, max_age: Duration) -> bool {
     uptime >= max_age
 }
 
-/// Delay idle entre polls (§3.11): `poll_min` hasta 20 vacíos seguidos,
-/// luego `poll_max`. Función pura para poder probarla sin timers.
+/// Idle delay between polls: `poll_min` until 20 consecutive empty polls,
+/// then `poll_max`. Pure function for timer-free testing.
 pub(crate) fn idle_delay(empty_streak: u32, poll_min: Duration, poll_max: Duration) -> Duration {
     if empty_streak >= 20 {
         poll_max
@@ -70,18 +70,18 @@ pub(crate) fn idle_delay(empty_streak: u32, poll_min: Duration, poll_max: Durati
     }
 }
 
-/// Backoff de reconexión a BD (solo `run --fg`).
+/// DB reconnect backoff (`run --fg` only).
 ///
-/// `failures` es el contador de fallos consecutivos (1 = primer fallo).
-/// Secuencia: 1s → 2s → 4s → 8s → 16s → 30s (cap). Función pura para
-/// poder probarla sin timers ni BD.
+/// `failures` counts consecutive failures (1 = first failure).
+/// Sequence: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (cap). Pure function for
+/// timer- and DB-free testing.
 pub(crate) fn db_reconnect_delay(failures: u32) -> Duration {
     let shift = failures.saturating_sub(1).min(5);
     Duration::from_secs((1u64 << shift).min(30))
 }
 
-/// Espera a SIGTERM o SIGINT (§3.9). En Unix escucha ambas;
-/// fuera de Unix solo Ctrl-C.
+/// Wait for SIGTERM or SIGINT. On Unix listen to both;
+/// off Unix, Ctrl-C only.
 pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -104,12 +104,12 @@ pub(crate) async fn shutdown_signal() {
     }
 }
 
-/// Intento único de conexión, con reintento infinito + backoff.
+/// Single connection attempt, with infinite retry + backoff.
 ///
-/// Solo para el loop persistente (`run --fg`): los one-shot (`status`,
-/// `list`, `inspect`, `run` sin `--fg`) usan `db::connect` directo y
-/// fallan alto. Devuelve `None` si llega SIGTERM/SIGINT durante la espera:
-/// el caller sale con `Ok(())` (exit 0, §3.9).
+/// Only for the persistent loop (`run --fg`): one-shots (`status`,
+/// `list`, `inspect`, `run` without `--fg`) use `db::connect` directly and
+/// fail loud. Returns `None` when SIGTERM/SIGINT arrives while waiting:
+/// the caller exits with `Ok(())` (exit 0).
 pub(crate) async fn connect_with_backoff(database_url: &str) -> Option<sqlx::postgres::PgPool> {
     let mut failures: u32 = 0;
     loop {
@@ -134,26 +134,26 @@ pub(crate) async fn connect_with_backoff(database_url: &str) -> Option<sqlx::pos
     }
 }
 
-/// Worker oneshot/loop: `config` para alcance y SMTP, `store` para la BD.
+/// Worker oneshot/loop: `config` for scope and SMTP, `store` for the DB.
 pub struct Worker {
     config: Config,
     store: PostgresTaskStore,
 }
 
 impl Worker {
-    /// Crea el worker sobre un pool ya conectado (el caller decide la
-    /// política de conexión: fallo alto en oneshot, backoff en loop).
+    /// Build the worker on an already-connected pool (the caller picks the
+    /// connection policy: fail loud in oneshots, backoff in loops).
     pub fn new(config: Config, store: PostgresTaskStore) -> Self {
         Self { config, store }
     }
 
-    // El pool de sqlx se cierra por drop al salir (sin close explícito:
-    // ningún camino de salida puede saltárselo en silencio).
-    /// `status`: tabla de conteos + sección daemon ya resuelta.
+    // The sqlx pool closes by drop on exit (no explicit close: no exit
+    // path can silently skip it).
+    /// `status`: counts table + already-resolved daemon section.
     ///
-    /// La fila heartbeat es la fuente canónica de vida (§3.10): se lee de
-    /// la BD y se muestra tras el daemon. Sin fila => `never_run` (el
-    /// sidecar aún no escribió); la sonda local sigue visible arriba.
+    /// The heartbeat row is the canonical liveness source: read from the
+    /// DB and shown after the daemon. No row => `never_run` (the sidecar
+    /// has not written yet); the local probe stays visible above.
     pub async fn run_status(&self, daemon: Option<&DaemonInfo>) -> Result<()> {
         let status = self.store.queue_status().await?;
         cli::print_status_table(&status);
@@ -170,14 +170,14 @@ impl Worker {
         Ok(())
     }
 
-    /// `inspect <UUID>`: todos los campos de una fila por id (sin filtro).
-    /// Por defecto recorta la PII; con `show_pii` (`--show-pii`, solo
-    /// operadores) imprime destinatario, cuerpos y `traceback` completos.
+    /// `inspect <UUID>`: every field of one row by id (unfiltered).
+    /// By default PII is trimmed; with `show_pii` (`--show-pii`, operators
+    /// only) print recipient, bodies and full `traceback`.
     pub async fn run_inspect(&self, id: &str, show_pii: bool) -> Result<()> {
         match self.store.inspect(id).await {
             Err(err) => {
-                // Un id que no es UUID revienta el `$1::uuid` en Postgres:
-                // mensaje limpio en vez del error crudo de la BD.
+                // A non-UUID id blows up the `$1::uuid` cast in Postgres:
+                // clean message instead of the raw DB error.
                 let msg = cli::format_inspect_error(id, &err.to_string());
                 Err(invalid_input(msg))
             }
@@ -192,16 +192,16 @@ impl Worker {
         }
     }
 
-    /// `list <estado>`: tabla de tareas con `--limit`/`--offset`.
+    /// `list <state>`: task table with `--limit`/`--offset`.
     pub async fn run_list(&self, query: &ListQuery) -> Result<()> {
         let tasks = self.store.list_tasks(query).await?;
         cli::print_task_list(&tasks);
         Ok(())
     }
 
-    /// `run` único: reclamo dirigido (`--id`) o genérico, sin loop.
+    /// Single `run`: targeted (`--id`) or generic claim, no loop.
     pub async fn run_once(&self, id: Option<&str>) -> Result<()> {
-        // Solo metadatos de alcance: nada de secretos ni cuerpos.
+        // Scope metadata only: no secrets or bodies.
         logging::debug(&format!(
             "alcance claim queue={} backend={} tasks={} worker_id={}",
             self.config.queue_name,
@@ -213,8 +213,8 @@ impl Worker {
             self.drain_once().await?;
             return Ok(());
         };
-        // Reclamo dirigido: solo si es ejecutable (READY + vencida +
-        // alcance). Mismo pipeline que el genérico, sin loop.
+        // Targeted claim: only when runnable (READY + due + in scope).
+        // Same pipeline as the generic one, without the loop.
         match self.store.claim_by_id(id).await {
             Err(err) => {
                 let msg = cli::format_inspect_error(id, &err.to_string());
@@ -244,10 +244,10 @@ impl Worker {
         }
     }
 
-    /// Procesa una tarea ya reclamada: parse → policy disco → SMTP → finalize.
-    /// Devuelve `Ok(Some(código))` si la tarea se finalizó `FAILED`,
-    /// `Ok(None)` si éxito o reencolado transitorio; el `Err` solo es de
-    /// BD. El código alimenta `last_error_code` del heartbeat (§3.10).
+    /// Process an already-claimed task: parse -> disk policy -> SMTP -> finalize.
+    /// Return `Ok(Some(code))` when the task finalized `FAILED`,
+    /// `Ok(None)` on success or transient requeue; `Err` is DB-only.
+    /// The code feeds the heartbeat's `last_error_code`.
     pub async fn handle_claimed(&self, task: &ClaimedTask) -> Result<Option<String>> {
         let store = &self.store;
         let config = &self.config;
@@ -259,8 +259,8 @@ impl Worker {
         ));
         let content = match contract::parse_args_kwargs(&task.args_kwargs) {
             Err(err) => {
-                // `detail` puede portar texto atacante: se muestra
-                // sanitizado (igual que se persiste, §3.2).
+                // `detail` may carry attacker text: shown sanitized
+                // (same as persisted).
                 logging::debug(&format!(
                     "payload rechazado id={} code={} detail={}",
                     task.id,
@@ -276,8 +276,8 @@ impl Worker {
             }
             Ok(content) => content,
         };
-        // Policy en disco (tamaños reales, symlinks,
-        // roots) antes de ensamblar nada (§3.4 paso B).
+        // On-disk policy (real sizes, symlinks, roots) before assembling
+        // anything.
         let files = match attachments::load(&config.attachment_roots, &content.attachment_paths) {
             Err(err) => {
                 logging::debug(&format!(
@@ -294,7 +294,7 @@ impl Worker {
             }
             Ok(files) => files,
         };
-        // Solo direcciones y presencia de cuerpos, nunca su contenido.
+        // Only addresses and body presence, never their content.
         logging::debug(&format!(
             "payload ok id={} to={} subject={:?} text={} html={} attachments={}",
             task.id,
@@ -314,7 +314,7 @@ impl Worker {
             "mensaje id={} kind={kind} to={}",
             task.id, content.to
         ));
-        // Sin `smtp_password`: solo parámetros de conexión.
+        // Without `smtp_password`: connection parameters only.
         logging::debug(&format!(
             "smtp host={} port={} tls={} user={}",
             config.smtp_host, config.smtp_port, config.smtp_use_tls, config.smtp_user
@@ -383,9 +383,9 @@ impl Worker {
         Ok(None)
     }
 
-    /// Una iteración: reap zombies (§3.7) + un claim genérico.
-    /// Devuelve el aporte al heartbeat si hubo trabajo (`None` si la cola
-    /// estaba vacía). Los errores de BD siguen siendo `Err`.
+    /// One iteration: reap zombies + one generic claim.
+    /// Return the heartbeat contribution when there was work (`None` when
+    /// the queue was empty). DB errors stay `Err`.
     pub async fn drain_once(&self) -> Result<Option<CycleBeat>> {
         let due = self.store.count_due().await?;
         let reaped = self.store.reap_zombies().await?;
@@ -410,8 +410,8 @@ impl Worker {
         }
     }
 
-    /// Escribe el heartbeat best-effort (§3.10): un fallo aquí no aborta
-    /// el loop (la frescura la decide el lector con el umbral de 90 s).
+    /// Write the heartbeat best-effort: a failure here never aborts
+    /// the loop (the reader decides freshness with the 90 s threshold).
     async fn beat(
         &self,
         due_seen: i64,
@@ -434,21 +434,22 @@ impl Worker {
         }
     }
 
-    /// Loop persistente §3.11 + shutdown graceful §3.9 + reconexión §3.6:
-    /// - El hijo daemon toma el lock ANTES de tocar la BD (fail loud → exit
-    ///   1); el guard vive hasta el final y suelta el lock al morir.
-    /// - Conexión inicial con backoff infinito (si la BD está caída al
-    ///   arrancar, no salimos con exit 1: esperamos a que vuelva).
-    /// - Cada iteración que falle por BD no aborta: log WARN, backoff
-    ///   1s→30s, y seguir. El pool de sqlx reconecta solo en el próximo
-    ///   `acquire`; nosotros solo evitamos el hot-loop contra una BD caída.
-    /// - El sleep (idle o backoff) siempre compite con `shutdown_signal`:
-    ///   SIGTERM/SIGINT sale con exit 0 aunque estemos esperando a la BD.
-    /// - Autoreciclaje (§3.8): tras `PILOTWAVE_RECYCLE_N` tareas o 7 días,
-    ///   devuelve `LoopEnd::Recycle` → exit 75 para que el keep-alive
-    ///   reinicie y mallocng (musl) recupere la memoria fragmentada.
-    /// - Heartbeat (§3.10): beat antes del drain (pre-envío) y después
-    ///   (contadores actualizados), más uno final antes de reciclar.
+    /// Persistent loop + graceful shutdown + reconnection:
+    /// - The daemon child takes the lock BEFORE touching the DB (fail loud
+    ///   -> exit 1); the guard lives until the end and releases the lock on
+    ///   death.
+    /// - Initial connection with infinite backoff (when the DB is down at
+    ///   startup, don't exit 1: wait for it to come back).
+    /// - An iteration failing on the DB never aborts: log WARN, 1s->30s
+    ///   backoff, and carry on. The sqlx pool reconnects on its own at the
+    ///   next `acquire`; we only avoid hot-looping a dead DB.
+    /// - Sleeping (idle or backoff) always races `shutdown_signal`:
+    ///   SIGTERM/SIGINT exits 0 even while waiting on the DB.
+    /// - Self-recycling: after `PILOTWAVE_RECYCLE_N` tasks or 7 days,
+    ///   return `LoopEnd::Recycle` -> exit 75 so the keep-alive restarts
+    ///   and the allocator recovers fragmented memory.
+    /// - Heartbeat: beat before the drain (pre-send) and after (updated
+    ///   counters), plus a final one before recycling.
     pub async fn run_loop(config: Config, is_bg_child: bool) -> Result<LoopEnd> {
         let _pid_guard = if is_bg_child {
             let (pid_path, _) = daemon::paths(&config).map_err(invalid_input)?;
@@ -463,12 +464,13 @@ impl Worker {
             None
         };
         let Some(pool) = connect_with_backoff(&config.database_url).await else {
-            // Shutdown durante la reconexión: salida limpia, exit 0 (§3.9).
+            // Shutdown during reconnect: clean exit, exit 0.
             return Ok(LoopEnd::Shutdown);
         };
         logging::info("postgres connected (max_connections=1)");
-        // R-6 (audit 001 §A07): fail loud si el rol no tiene los GRANT
-        // minimos. Es error de config, no de red: sin backoff, exit 1.
+        // Least-privilege check (roadmap R-6): fail loud when the role
+        // lacks the minimum GRANTs. Config error, not network: no backoff,
+        // exit 1.
         if let Err(err) = db::verify_least_privilege(&pool, config.skip_grant_check).await {
             logging::error(&err);
             return Err(invalid_input(err));
@@ -494,14 +496,14 @@ impl Worker {
         let mut processed: u64 = 0;
         let mut last_task_id: Option<String> = None;
         let mut last_error_code: Option<String> = None;
-        // `due_seen` alimenta `queue_depth_seen`: el beat previo al primer
-        // drain usa 0 (aún no se ha visto la cola).
+        // `due_seen` feeds `queue_depth_seen`: the beat before the first
+        // drain uses 0 (the queue has not been seen yet).
         let mut due_seen: i64 = 0;
         let started = std::time::Instant::now();
         loop {
-            // §3.8: reciclar antes de reclamar la siguiente tarea (nunca a
-            // mitad de un envío). El beat final deja la fila fresca para
-            // que el keep-alive distinga el reciclaje de una muerte.
+            // Recycle before claiming the next task (never mid-send). The
+            // final beat leaves the row fresh so the keep-alive can tell a
+            // recycle apart from a death.
             if should_recycle_tasks(processed, worker.config.recycle_n)
                 || should_recycle_age(started.elapsed(), RECYCLE_MAX_AGE)
             {
@@ -514,8 +516,8 @@ impl Worker {
                     .await;
                 return Ok(LoopEnd::Recycle);
             }
-            // Beat previo al drain (§3.10: antes de cada envío; con un send
-            // de 30 s este es el que mantiene la fila fresca).
+            // Pre-drain beat (before each send; with a 30 s send this is
+            // the one keeping the row fresh).
             worker
                 .beat(due_seen, processed, &last_task_id, &last_error_code)
                 .await;
@@ -529,8 +531,8 @@ impl Worker {
                         last_error_code = beat.error_code;
                         due_seen = beat.queue_depth_seen;
                     }
-                    // Beat posterior al drain (§3.10: después de cada envío,
-                    // con los contadores ya actualizados).
+                    // Post-drain beat (after each send, with counters
+                    // already updated).
                     worker
                         .beat(due_seen, processed, &last_task_id, &last_error_code)
                         .await;
@@ -551,7 +553,7 @@ impl Worker {
                         "db error (fallo consecutivo {db_failures}): {err}; reintentando en {}s",
                         delay.as_secs()
                     ));
-                    // No tocamos `empty`: es racha de polls vacíos, no de fallos.
+                    // Leave `empty` alone: it counts empty polls, not failures.
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = shutdown_signal() => {
@@ -562,7 +564,7 @@ impl Worker {
                 }
             }
         }
-        // El pool cae por drop aquí (cierre sin camino silencioso).
+        // The pool drops here (no silent close path).
         Ok(LoopEnd::Shutdown)
     }
 }
@@ -599,10 +601,10 @@ mod tests {
         assert!(!should_recycle_tasks(4_999, 5_000));
         assert!(should_recycle_tasks(5_000, 5_000));
         assert!(should_recycle_tasks(5_001, 5_000));
-        // Config inválida (recycle_n=0) nunca llega aquí (config lo rechaza),
-        // pero el helper no debe pedir más de lo que el contador ya tiene.
+        // Invalid config (recycle_n=0) never reaches here (config rejects
+        // it), but the helper must not ask for more than the counter holds.
         assert!(should_recycle_tasks(0, 0));
-        // Antigüedad: 7 días.
+        // Age: 7 days.
         assert_eq!(RECYCLE_MAX_AGE, Duration::from_secs(7 * 24 * 60 * 60));
         assert!(!should_recycle_age(
             RECYCLE_MAX_AGE - Duration::from_secs(1),

@@ -1,12 +1,12 @@
-//! Implementacion PostgreSQL de [`super::store::TaskStore`].
+//! PostgreSQL implementation of [`super::store::TaskStore`].
 //!
-//! Port del prototipo: unico lugar con SQL. Todo es `SELECT`/estatico con
-//! binds — nunca interpolacion de payload.
+//! The single place with SQL. Everything is static `SELECT` with
+//! binds -- never payload interpolation.
 //!
-//! Los literales SQL (`READY`, tablas, sentinel) repiten el texto del
-//! contrato a proposito: el SQL debe ser estatico y auditable en un solo
-//! lugar. El test `sql_usa_literales_del_contrato` lo ancla a
-//! [`crate::contract`] para que cualquier deriva falle en `cargo test`.
+//! SQL literals (`READY`, tables, sentinel) repeat the contract text on
+//! purpose: SQL must be static and auditable in one place. The
+//! `sql_usa_literales_del_contrato` test pins it to [`crate::contract`]
+//! so any drift fails `cargo test`.
 
 use sqlx::postgres::PgPool;
 
@@ -22,14 +22,14 @@ pub struct PostgresTaskStore {
     worker_id: String,
 }
 
-/// Palabras cuyos `clave=valor` se redactan antes de persistir (contrato
-/// §Failure codes: `traceback` siempre pasa por redaccion + truncado).
+/// Words whose `key=value` pairs are redacted before persisting (contract
+/// Failure codes: `traceback` always goes through redaction + truncation).
 const SECRET_KEYS: &[&str] = &["password", "secret", "token", "key", "dsn", "url"];
 
-/// Redacta valores `clave=valor` / `clave:valor` para las claves de
-/// `SECRET_KEYS` (case-insensitive) y trunca a [`TRACEBACK_MAX_BYTES`]. Se
-/// aplica tanto a la escritura en BD como a los logs debug: `err.detail`
-/// incluye texto atacante (`invalid to: ...`) que puede portar
+/// Redact `key=value` / `key:value` values for the `SECRET_KEYS` keys
+/// (case-insensitive) and truncate to [`TRACEBACK_MAX_BYTES`]. Applies
+/// both to DB writes and to debug logs: `err.detail` carries
+/// attacker-controlled text (`invalid to: ...`) that may contain
 /// `password=...`.
 pub fn sanitize_detail(raw: &str) -> String {
     let redacted = redact_secrets(raw);
@@ -38,18 +38,18 @@ pub fn sanitize_detail(raw: &str) -> String {
 
 fn redact_secrets(raw: &str) -> String {
     let mut out = raw.to_owned();
-    // Bucle: en cada pasada se redacta la ÚLTIMA ocurrencia `clave=valor` y
-    // se vuelve a escanear `out` desde cero, así los índices siempre son
-    // vigentes (cada redacción elimina el valor: progreso garantizado).
+    // Loop: each pass redacts the LAST `key=value` occurrence and
+    // rescans `out` from scratch, so indexes stay valid (each redaction
+    // removes the value: guaranteed progress).
     while let Some((start, end)) = last_secret_value(&out) {
         out.replace_range(start..end, "[redacted]");
     }
     out
 }
 
-/// Último `clave=valor`/`clave:valor` (case-insensitive) con el rango del
-/// valor en bytes, o `None`. El valor termina en el primer delimitador o a
-/// los 256 bytes; el avance es por char para no partir UTF-8.
+/// Last `key=value`/`key:value` match (case-insensitive) with the value's
+/// byte range, or `None`. The value ends at the first delimiter or after
+/// 256 bytes; advance is char-wise to never split UTF-8.
 fn last_secret_value(hay: &str) -> Option<(usize, usize)> {
     let bytes = hay.as_bytes();
     let mut best: Option<(usize, usize)> = None;
@@ -81,9 +81,9 @@ fn last_secret_value(hay: &str) -> Option<(usize, usize)> {
                 end += hay[end..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             }
             if end > i {
-                // `[redacted]` es terminal: si el valor ya lo es, seguir
-                // buscando ocurrencias anteriores en vez de re-redactarlo
-                // (aquí estaba el bucle infinito).
+                // `[redacted]` is terminal: when the value already is one,
+                // keep looking for earlier occurrences instead of
+                // re-redacting it (the infinite loop used to live here).
                 if &hay[i..end] == "[redacted]" {
                     continue;
                 }
@@ -91,7 +91,7 @@ fn last_secret_value(hay: &str) -> Option<(usize, usize)> {
                     best = Some((i, end));
                 }
             }
-            break; // solo la última ocurrencia de esta clave importa
+            break; // only this key's last occurrence matters
         }
     }
     best
@@ -117,8 +117,8 @@ impl PostgresTaskStore {
         }
     }
 
-    // Sin `close()` explícito: `sqlx::Pool` se cierra por drop y ningún
-    // camino de salida (incluidos los `?` tempranos) puede saltárselo.
+    // No explicit `close()`: `sqlx::Pool` closes on drop and no exit path
+    // (including early `?` returns) can skip it.
 }
 
 const STATUS_SQL: &str = r#"
@@ -259,8 +259,9 @@ const INSPECT_SQL: &str = r#"
     WHERE id = $1::uuid
     "#;
 
-/// Upsert del heartbeat (contrato §Heartbeat): la fila es la fuente canonica
-/// de vida. `last_seen` lo pone la BD (`NOW()`), nunca el reloj del proceso.
+/// Heartbeat upsert (contract Heartbeat): the row is the canonical
+/// liveness source. `last_seen` is set by the DB (`NOW()`), never by the
+/// process clock.
 const HEARTBEAT_UPSERT_SQL: &str = r#"
     INSERT INTO pilotwave_heartbeat (key, last_seen, metadata)
     VALUES ($1, NOW(), $2::jsonb)
@@ -268,8 +269,8 @@ const HEARTBEAT_UPSERT_SQL: &str = r#"
     SET last_seen = NOW(), metadata = EXCLUDED.metadata
     "#;
 
-/// Lectura del heartbeat para `status`: `last_seen` formateado + edad en
-/// segundos (frescura sin parsear fechas en Rust) + `metadata` crudo.
+/// Heartbeat read for `status`: formatted `last_seen` + age in seconds
+/// (freshness without parsing dates in Rust) + raw `metadata`.
 const HEARTBEAT_READ_SQL: &str = r#"
     SELECT
         to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_seen,
@@ -311,8 +312,7 @@ impl TaskStore for PostgresTaskStore {
     }
 
     async fn inspect(&self, id: &str) -> Result<Option<InspectedTask>, sqlx::Error> {
-        // Sin filtro de cola/backend/task_path: `inspect` es depuración
-        // de cualquier fila por id.
+        // No queue/backend/task_path filter: `inspect` debugs any row by id.
         sqlx::query_as::<_, InspectedTask>(INSPECT_SQL)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -349,8 +349,8 @@ impl TaskStore for PostgresTaskStore {
     }
 
     async fn finalize_failed(&self, id: &str, code: &str, detail: &str) -> Result<(), sqlx::Error> {
-        // Sanitizar en Rust (no en SQL): `substring` es por caracteres y no
-        // redacta nada (contrato §Failure codes).
+        // Sanitize in Rust (not in SQL): `substring` counts characters and
+        // redacts nothing (contract Failure codes).
         let clean = sanitize_detail(detail);
         sqlx::query(FINALIZE_FAILED_SQL)
             .bind(id)
@@ -424,7 +424,7 @@ mod tests {
             );
             assert!(clean.contains("[redacted]"), "raw={raw:?}");
         }
-        // Sin clave=valor no hay nada que redactar.
+        // With no key=value pair there is nothing to redact.
         let clean = sanitize_detail("invalid to mailbox: missing @");
         assert!(clean.contains("mailbox"));
     }
@@ -438,8 +438,8 @@ mod tests {
         assert!(clean.contains("[redacted]"));
     }
 
-    /// Ancla el SQL estatico a `contract.rs`: si un literal del contrato
-    /// cambia, este test obliga a actualizar el SQL (o viceversa).
+    /// Pins the static SQL to `contract.rs`: when a contract literal
+    /// changes, this test forces the SQL to be updated (or vice versa).
     #[test]
     fn sql_usa_literales_del_contrato() {
         for sql in [
@@ -484,8 +484,7 @@ mod tests {
                 "estado {status} ausente del SQL"
             );
         }
-        // Sentinel + claim atomico + orden del contrato en cada query de
-        // vencimiento/claim.
+        // Sentinel + atomic claim + contract ordering in every due/claim query.
         for sql in [STATUS_SQL, CLAIM_SQL, CLAIM_BY_ID_SQL, COUNT_DUE_SQL] {
             assert!(sql.contains(RUN_AFTER_SENTINEL), "SQL sin sentinel: {sql}");
         }
@@ -500,15 +499,15 @@ mod tests {
             CLAIM_SQL.contains("ORDER BY priority DESC, run_after ASC, enqueued_at ASC"),
             "claim sin el orden del contrato"
         );
-        // Heartbeat: upsert por clave, `last_seen` lo pone la BD.
+        // Heartbeat: upsert by key, `last_seen` set by the DB.
         assert!(HEARTBEAT_UPSERT_SQL.contains("ON CONFLICT (key) DO UPDATE"));
         assert!(HEARTBEAT_UPSERT_SQL.contains("NOW()"));
-        // Finalize FAILED escribe codigo + detalle sanitizado.
+        // Finalize FAILED writes code + sanitized detail.
         assert!(FINALIZE_FAILED_SQL.contains("exception_class_path"));
         assert!(FINALIZE_FAILED_SQL.contains("traceback"));
-        // Requeue de transitorios: READY + run_after diferido.
+        // Transient requeue: READY + deferred run_after.
         assert!(REQUEUE_SQL.contains("NOW() + ($2 * INTERVAL '1 second')"));
-        // Reaper solo toca zombies propios del worker Rust.
+        // The reaper only touches this worker family's own zombies.
         assert!(REAPER_SQL.contains("LIKE 'pilotwave-%'"));
     }
 }

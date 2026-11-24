@@ -1,8 +1,7 @@
-//! Abstraccion de persistencia (Dependency Inversion).
+//! Persistence abstraction (dependency inversion).
 //!
-//! Port del prototipo: el binario programa contra este trait, no contra
-//! `PgPool`; los subcomandos de solo lectura (lote 7.4) se prueban con un
-//! fake sin PG.
+//! The binary programs against this trait, not `PgPool`; the read-only
+//! subcommands are tested with a fake that needs no Postgres.
 
 use super::models::{ClaimedTask, Heartbeat, InspectedTask, ListQuery, ListedTask, QueueStatus};
 
@@ -11,25 +10,24 @@ pub trait TaskStore {
     async fn count_due(&self) -> Result<i64, sqlx::Error>;
     async fn queue_status(&self) -> Result<QueueStatus, sqlx::Error>;
     async fn list_tasks(&self, query: &ListQuery) -> Result<Vec<ListedTask>, sqlx::Error>;
-    /// Detalle de una fila por id, sin filtrar por cola (herramienta de depuración).
+    /// Detail of one row by id, unfiltered by queue (debugging tool).
     async fn inspect(&self, id: &str) -> Result<Option<InspectedTask>, sqlx::Error>;
     async fn claim(&self) -> Result<Option<ClaimedTask>, sqlx::Error>;
-    /// Reclama una fila concreta si es ejecutable: READY + vencida +
-    /// dentro del alcance (cola/backend/task_path). Si no lo es
-    /// (inexistente, RUNNING, futura, fuera de alcance) devuelve `None`
-    /// sin tocarla — nunca roba trabajo ajeno.
+    /// Claim one specific row if it is runnable: READY + due +
+    /// in scope (queue/backend/task_path). Otherwise (missing, RUNNING,
+    /// future, out of scope) return `None` untouched -- never steal another
+    /// worker's work.
     async fn claim_by_id(&self, id: &str) -> Result<Option<ClaimedTask>, sqlx::Error>;
     async fn finalize_success(&self, id: &str) -> Result<(), sqlx::Error>;
     async fn finalize_failed(&self, id: &str, code: &str, detail: &str) -> Result<(), sqlx::Error>;
-    /// Reencola un transitorio: `READY` + `run_after = NOW() + delay` (contrato §Failure codes).
+    /// Requeue a transient: `READY` + `run_after = NOW() + delay` (contract Failure codes).
     async fn requeue_transient(&self, id: &str, delay_secs: i64) -> Result<(), sqlx::Error>;
-    /// Reaper de zombies propios: `RUNNING` viejos con sufijo `pilotwave-*`.
-    /// Devuelve filas reencoladas. Nunca toca filas del fallback Python.
+    /// Reaper for our own zombies: old `RUNNING` rows with a `pilotwave-*` suffix.
+    /// Returns requeued rows. Never touches rows from other worker families.
     async fn reap_zombies(&self) -> Result<u64, sqlx::Error>;
-    /// Escribe el heartbeat del sidecar (upsert por clave, contrato §Heartbeat).
-    /// `metadata_json` sale del render de 7.4 (contadores + identidad
-    /// operativa, nunca PII).
+    /// Write the sidecar heartbeat (upsert by key, contract Heartbeat).
+    /// `metadata_json` carries counters + operational identity, never PII.
     async fn write_heartbeat(&self, metadata_json: &str) -> Result<(), sqlx::Error>;
-    /// Lee el heartbeat para `status`: `None` si el sidecar aún no escribió.
+    /// Read the heartbeat for `status`: `None` when the sidecar has not written yet.
     async fn read_heartbeat(&self) -> Result<Option<Heartbeat>, sqlx::Error>;
 }

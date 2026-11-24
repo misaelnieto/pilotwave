@@ -10,10 +10,21 @@ readme = "README.md"
 authors = [
   {name = "Noe Nieto", email = "nnieto@noenieto.com"},
 ]
+maintainers = [
+  {name = "Pilotwave", email = "pilotwave@noenieto.com"},
+]
 requires-python = ">=3.14"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["django", "email", "tasks", "postgres", "worker", "rust"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Framework :: Django",
     "Framework :: Django :: 6",
+    "Topic :: Communications :: Email",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
 ]
@@ -23,6 +34,13 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
 ]
 
+[project.urls]
+Homepage = "https://github.com/misaelnieto/pilotwave"
+Repository = "https://github.com/misaelnieto/pilotwave"
+Issues = "https://github.com/misaelnieto/pilotwave/issues"
+Documentation = "https://github.com/misaelnieto/pilotwave/blob/main/docs/README.md"
+Security = "https://github.com/misaelnieto/pilotwave/security/advisories"
+
 [dependency-groups]
 dev = [
     "maturin>=1.9,<2.0",
@@ -30,6 +48,7 @@ dev = [
     "pytest>=9.0",
     "pytest-django>=4.12",
     "ruff>=0.16.0",
+    "python-semantic-release>=9.0.0",
 ]
 
 [tool.maturin]
@@ -56,3 +75,36 @@ select = ["E", "F", "I", "UP", "B", "DJ", "RET", "SIM"]
 
 [tool.ruff.format]
 quote-style = "single"
+
+# =============================================================================
+# Semantic Release Configuration (python-semantic-release, conventional commits)
+# Receta: igual que backoffice_tramites. Solo se ejecuta desde
+# .github/workflows/build-release.yaml (disparo manual).
+# version_toml sincroniza pyproject + rust-worker/Cargo.toml en cada release
+# para que el job de build pueda verificar que no hay drift de versión.
+# =============================================================================
+[tool.semantic_release]
+version_toml = [
+    "pyproject.toml:project.version",
+    "rust-worker/Cargo.toml:package.version",
+]
+version_variables = []
+branch = "main"
+commit_version_number = true
+tag_format = "v{version}"
+upload_to_release = true
+build_command = "echo 'No build step required'"
+major_on_zero = false
+
+[tool.semantic_release.commit_parser_options]
+# Conventional Commits specification
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf", "docs", "style", "refactor", "build", "ci", "chore", "revert", "test"]
+
+[tool.semantic_release.remote]
+token = { env = "GITHUB_TOKEN" }
+type = "github"
+
+[tool.semantic_release.publish]
+dist_glob_patterns = ["dist/*"]

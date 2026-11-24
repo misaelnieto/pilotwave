@@ -1,15 +1,13 @@
-//! `log`: tail de `PILOTWAVE_LOG_FILE` (PLAN-003 §3.10.6, un solo archivo
-//! line-oriented).
+//! `log`: tail of `PILOTWAVE_LOG_FILE` (single line-oriented file).
 //!
-//! - Sin `-f`: imprime las últimas N líneas a stdout y sale.
-//! - Con `-f`: imprime las últimas N líneas y sigue mostrando los appends
-//!   (poll cada [`FOLLOW_POLL`]) hasta SIGTERM/SIGINT (exit 0).
-//! - Ante rotación (inode distinto) o truncado (tamaño < offset) avisa a
-//!   stderr (`rotación detectada: reabriendo desde el inicio`) y reabre
-//!   desde 0.
-//! - La salida es exacta: líneas tal cual, sin numerar ni prefijos.
-//!   Stdout lleva solo contenido del log; los avisos van a stderr.
-//! - No toca la BD: solo necesita `config.log_file` (ruta absoluta).
+//! - Without `-f`: print the last N lines to stdout and exit.
+//! - With `-f`: print the last N lines, then keep showing appends
+//!   (poll every [`FOLLOW_POLL`]) until SIGTERM/SIGINT (exit 0).
+//! - On rotation (different inode) or truncation (size < offset) warn on
+//!   stderr and reopen from 0.
+//! - Output is exact: lines verbatim, no numbering or prefixes.
+//!   Stdout carries only log content; warnings go to stderr.
+//! - Never touches the DB: only needs `config.log_file` (absolute path).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,21 +17,20 @@ use std::time::Duration;
 use crate::cli::LogArgs;
 use crate::config::Config;
 
-/// Intervalo de sondeo de appends en `-f` (~500 ms, dentro del 500 ms-1 s
-/// pedido).
+/// Append poll interval for `-f` (~500 ms).
 pub const FOLLOW_POLL: Duration = Duration::from_millis(500);
-/// Aviso a stderr ante rotación o truncado (el log rota poco, pero hay que
-/// detectarlo en vez de quedarse colgado en un offset muerto).
+/// Stderr warning on rotation or truncation (the log rotates rarely, but it
+/// must be detected instead of hanging on a dead offset).
 pub const ROTATION_NOTICE: &str = "rotación detectada: reabriendo desde el inicio";
-/// Bloque de lectura reversa del tail (evita cargar el archivo entero).
+/// Reverse-read block size for the tail (avoids loading the whole file).
 const TAIL_BLOCK: u64 = 8 * 1024;
-/// Tope por poll en `-f`: si un poll trae más, se avanza por tramos en vez
-/// de cargar todo de golpe.
+/// Cap per poll in `-f`: when a poll brings more, advance in chunks instead
+/// of loading everything at once.
 const FOLLOW_MAX_READ: u64 = 16 * 1024 * 1024;
 
-/// Resuelve el archivo a leer: exige `PILOTWAVE_LOG_FILE` absoluta y que el
-/// archivo exista (nunca se crea vacío: si falta es fail loud con ruta y
-/// causa, exit 1).
+/// Resolve the file to read: require an absolute `PILOTWAVE_LOG_FILE` and an
+/// existing file (never created empty: when missing, fail loud with path and
+/// cause, exit 1).
 pub fn resolve_log_file(config: &Config) -> Result<PathBuf, String> {
     let path = config.log_file.clone().ok_or_else(|| {
         "PILOTWAVE_LOG_FILE no configurado: `log` necesita la ruta absoluta del log del daemon"
@@ -43,7 +40,7 @@ pub fn resolve_log_file(config: &Config) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Causa legible con ruta, qué operación y pista accionable.
+/// Human-readable cause with path, operation and actionable hint.
 fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind as Kind;
     let hint = match err.kind() {
@@ -55,12 +52,12 @@ fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     format!("{what} {}: {hint}: {err}", path.display())
 }
 
-/// Últimas `n` líneas de `text` (helper puro, sin E/S).
+/// Last `n` lines of `text` (pure helper, no I/O).
 ///
-/// Es el núcleo testeable del tail: el binario usa [`tail_file`] (bytes,
-/// sin cargar el archivo entero) y este helper expone la misma semántica
-/// sobre `&str` para tests y futuros renders.
-/// `n == 0` => vacío; `n` mayor que el total => todo. No incluye los `\n`.
+/// The testable core of the tail: the binary uses [`tail_file`] (bytes,
+/// without loading the whole file) and this helper exposes the same semantics
+/// over `&str` for tests and future renderers.
+/// `n == 0` => empty; `n` larger than the total => everything. Excludes `\n`.
 #[allow(dead_code)]
 pub fn last_n_lines(text: &str, n: usize) -> Vec<&str> {
     if n == 0 {
@@ -73,9 +70,9 @@ pub fn last_n_lines(text: &str, n: usize) -> Vec<&str> {
     lines[lines.len() - n..].to_vec()
 }
 
-/// Decide si `-f` debe reabrir desde 0: el inode cambió (rotación) o el
-/// tamaño encogió bajo el offset (truncado). Función pura para probarla
-/// sin E/S (los tamaños/inodes se inyectan).
+/// Decide whether `-f` must reopen from 0: the inode changed (rotation) or
+/// the size shrank below the offset (truncation). Pure function for testing
+/// without I/O (sizes/inodes are injected).
 pub fn needs_reopen(
     prev_len: u64,
     cur_len: u64,
@@ -85,11 +82,11 @@ pub fn needs_reopen(
     cur_ino != prev_ino || cur_len < prev_len
 }
 
-/// Lee las últimas `n` líneas del archivo (bytes exactos, con sus `\n`).
+/// Read the last `n` lines of the file (exact bytes, with their `\n`).
 ///
-/// Escanea hacia atrás por bloques de 8 KB contando `\n`, así que no carga
-/// el archivo entero en memoria (el log rota poco pero puede crecer).
-/// `n == 0` => vacío; menos de `n` líneas => todo el archivo.
+/// Scan backwards in 8 KB blocks counting `\n`, so the whole file is never
+/// loaded into memory (the log rotates rarely but can grow).
+/// `n == 0` => empty; fewer than `n` lines => the whole file.
 pub fn tail_file(path: &Path, n: u64) -> Result<Vec<u8>, String> {
     if n == 0 {
         return Ok(Vec::new());
@@ -102,8 +99,8 @@ pub fn tail_file(path: &Path, n: u64) -> Result<Vec<u8>, String> {
     if len == 0 {
         return Ok(Vec::new());
     }
-    // Si el archivo termina en `\n`, ese byte cierra la última línea y no
-    // cuenta como separador extra.
+    // When the file ends in `\n`, that byte closes the last line and does
+    // not count as an extra separator.
     let ends_with_nl = {
         file.seek(SeekFrom::End(-1))
             .map_err(|err| open_failed(path, "log file (seek)", &err))?;
@@ -144,7 +141,7 @@ pub fn tail_file(path: &Path, n: u64) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Lee el rango `[offset, len)` del archivo (un tramo de `-f`).
+/// Read the `[offset, len)` range of the file (one `-f` chunk).
 fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
     let end = len.min(offset.saturating_add(FOLLOW_MAX_READ));
     let mut file = File::open(path).map_err(|err| open_failed(path, "log file", &err))?;
@@ -157,9 +154,9 @@ fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Tamaño e inode actual (el inode detecta la rotación aunque el tamaño
-/// coincida). `None` si la plataforma no da inode (entonces solo el tamaño
-/// decide).
+/// Current size and inode (the inode detects rotation even when the size
+/// matches). `None` when the platform gives no inode (then size alone
+/// decides).
 fn stat(path: &Path) -> Result<(u64, Option<u64>), String> {
     let meta = std::fs::metadata(path).map_err(|err| open_failed(path, "log file", &err))?;
     #[cfg(unix)]
@@ -169,15 +166,15 @@ fn stat(path: &Path) -> Result<(u64, Option<u64>), String> {
     Ok((meta.len(), ino))
 }
 
-/// Escribe bytes exactos a stdout (contenido del log, sin adornos).
+/// Write exact bytes to stdout (log content, no decorations).
 fn write_stdout(data: &[u8]) -> std::io::Result<()> {
     let mut out = std::io::stdout();
     out.write_all(data)?;
     out.flush()
 }
 
-/// `log`: tail de `PILOTWAVE_LOG_FILE`. Sin `-f` imprime y sale; con `-f`
-/// sigue los appends hasta SIGTERM/SIGINT (exit 0). No toca la BD.
+/// `log`: tail of `PILOTWAVE_LOG_FILE`. Without `-f` print and exit; with
+/// `-f` follow appends until SIGTERM/SIGINT (exit 0). Never touches the DB.
 pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std::error::Error>> {
     let fail = |msg: String| -> Box<dyn std::error::Error> {
         eprintln!("error: {msg}");
@@ -200,11 +197,11 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
     if !args.follow {
         return Ok(());
     }
-    // El tail ya mostró todo lo viejo: el follow parte del tamaño actual
-    // y solo trae lo nuevo.
+    // The tail already showed everything old: the follow starts from the
+    // current size and only brings what is new.
     let (mut offset, mut ino) = match stat(&path) {
         Ok(st) => st,
-        // Carrera improbable (acaba de leerse): avisa y parte de 0.
+        // Unlikely race (just read): warn and restart from 0.
         Err(msg) => {
             eprintln!("aviso: {msg}");
             (0, None)
@@ -235,8 +232,8 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
                         eprintln!("aviso: stdout: {err}");
                         break;
                     }
-                    // Tramo parcial (tope por poll): el siguiente poll trae
-                    // el resto sin reabrir.
+                    // Partial chunk (per-poll cap): the next poll brings
+                    // the rest without reopening.
                 }
                 Err(msg) => eprintln!("aviso: {msg}"),
             }
@@ -249,7 +246,7 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
 mod tests {
     use super::*;
 
-    /// Archivo temporal único por test (sin `tempfile`: solo std).
+    /// Unique temp file per test (no `tempfile`: std only).
     fn tmp_log(name: &str) -> PathBuf {
         let unique = format!(
             "pilotwave-worker-test-{}-{}-{name}.log",
@@ -277,12 +274,12 @@ mod tests {
             last_n_lines(&text, 5),
             vec!["linea-1", "linea-2", "linea-3", "linea-4", "linea-5"]
         );
-        // Más que el total, cero y vacío.
+        // More than the total, zero and empty.
         let text = numbered(3);
         assert_eq!(last_n_lines(&text, 99).len(), 3);
         assert!(last_n_lines(&text, 0).is_empty());
         assert!(last_n_lines("", 10).is_empty());
-        // Sin newline final la última línea cuenta igual.
+        // Without a trailing newline the last line still counts.
         assert_eq!(last_n_lines("a\nb", 1), vec!["b"]);
         assert_eq!(last_n_lines("a\nb", 2), vec!["a", "b"]);
         assert_eq!(last_n_lines("sola", 1), vec!["sola"]);
@@ -290,16 +287,16 @@ mod tests {
 
     #[test]
     fn needs_reopen_detecta_truncado_y_rotacion() {
-        // Crece con mismo inode: seguir.
+        // Grows with same inode: keep following.
         assert!(!needs_reopen(100, 150, Some(7), Some(7)));
-        // Igual: seguir.
+        // Unchanged: keep following.
         assert!(!needs_reopen(100, 100, Some(7), Some(7)));
-        // Truncado (tamaño < offset): reabrir.
+        // Truncated (size < offset): reopen.
         assert!(needs_reopen(100, 40, Some(7), Some(7)));
-        // Rotación (inode distinto aunque el tamaño coincida): reabrir.
+        // Rotated (different inode even when the size matches): reopen.
         assert!(needs_reopen(100, 100, Some(7), Some(8)));
         assert!(needs_reopen(100, 150, Some(7), Some(8)));
-        // Archivo recreado (tamaño 0): reabrir.
+        // Recreated file (size 0): reopen.
         assert!(needs_reopen(100, 0, Some(7), Some(7)));
     }
 
@@ -310,22 +307,22 @@ mod tests {
         let out = tail_file(&path, 10).unwrap();
         let expected: String = (91..=100).map(|i| format!("linea-{i}\n")).collect();
         assert_eq!(out, expected.as_bytes());
-        // Vacío => vacío.
+        // Empty => empty.
         std::fs::write(&path, "").unwrap();
         assert!(tail_file(&path, 10).unwrap().is_empty());
-        // n mayor que el total => todo.
+        // n larger than the total => everything.
         std::fs::write(&path, "a\nb\n").unwrap();
         assert_eq!(tail_file(&path, 99).unwrap(), b"a\nb\n");
-        // Sin newline final: la última línea cuenta igual.
+        // Without a trailing newline: the last line still counts.
         std::fs::write(&path, "a\nb").unwrap();
         assert_eq!(tail_file(&path, 1).unwrap(), b"b");
         assert_eq!(tail_file(&path, 2).unwrap(), b"a\nb");
-        // Cruza varios bloques de 8 KB (20 KB, una sola línea larga + cola).
+        // Spans several 8 KB blocks (20 KB, one long line + tail).
         let big = format!("{}\n", "x".repeat(20 * 1024));
         std::fs::write(&path, format!("{big}cola1\ncola2\n")).unwrap();
         assert_eq!(tail_file(&path, 2).unwrap(), b"cola1\ncola2\n");
         assert_eq!(tail_file(&path, 1).unwrap(), b"cola2\n");
-        // n == 0 => vacío sin siquiera abrir de más.
+        // n == 0 => empty without opening anything extra.
         assert!(tail_file(&path, 0).unwrap().is_empty());
         std::fs::remove_file(&path).unwrap();
     }
@@ -341,8 +338,8 @@ mod tests {
         );
     }
 
-    /// `Config` mínima en memoria para probar `resolve_log_file` sin
-    /// entorno ni BD.
+    /// Minimal in-memory `Config` to test `resolve_log_file` without
+    /// environment or DB.
     fn test_config(log: Option<PathBuf>) -> Config {
         Config {
             database_url: "postgres://u:p@127.0.0.1/db".to_owned(),
@@ -371,10 +368,10 @@ mod tests {
 
     #[test]
     fn resolve_log_file_fail_loud_y_ok() {
-        // Sin log configurado: fallo alto con la var.
+        // Without a configured log: loud failure naming the var.
         let err = resolve_log_file(&test_config(None)).expect_err("fail loud");
         assert!(err.contains("PILOTWAVE_LOG_FILE"), "got: {err}");
-        // Inexistente: falla con la ruta y no crea el archivo.
+        // Missing: fail with the path, never create the file.
         let path = tmp_log("no-crear");
         assert!(!path.exists());
         let err = resolve_log_file(&test_config(Some(path.clone()))).expect_err("fail loud");
@@ -383,7 +380,7 @@ mod tests {
             "ruta, got: {err}"
         );
         assert!(!path.exists(), "no debe crear el archivo vacío");
-        // Existente: ok.
+        // Existing: ok.
         let path = tmp_log("ok");
         std::fs::write(&path, "x\n").unwrap();
         assert_eq!(

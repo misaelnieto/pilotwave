@@ -1,12 +1,12 @@
 //! Filas de `django_tasks_database_dbtaskresult` + objetos de consulta.
 //!
-//! Port del prototipo: sin SQL ni conexion, solo tipos. Los literales de
-//! estado salen de [`crate::contract`] (fuente unica); aqui no hay strings
-//! `"READY"`/`"RUNNING"` duplicados.
+//! No SQL, no connections, only types. Status literals come from
+//! [`crate::contract`] (single source); no duplicated
+//! `"READY"`/`"RUNNING"` strings here.
 
 use crate::contract::{STATUS_FAILED, STATUS_READY, STATUS_RUNNING, STATUS_SUCCESSFUL};
 
-/// Estado de listado del subcomando `list` (lote 7.4).
+/// List state for the `list` subcommand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Ready,
@@ -16,8 +16,8 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    /// Literal exacto de la columna `status` (contrato: `READY`/`RUNNING`/
-    /// `SUCCESSFUL`/`FAILED`). `Done` conserva el nombre del prototipo.
+    /// Exact literal of the `status` column (contract: `READY`/`RUNNING`/
+    /// `SUCCESSFUL`/`FAILED`).
     pub fn as_db_str(&self) -> &'static str {
         match self {
             TaskStatus::Ready => STATUS_READY,
@@ -28,7 +28,7 @@ impl TaskStatus {
     }
 }
 
-/// Query Object de `list`: estado + `LIMIT`/`OFFSET` ya validados.
+/// Query object for `list`: state + already-validated `LIMIT`/`OFFSET`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListQuery {
     pub status: TaskStatus,
@@ -56,12 +56,12 @@ impl ListQuery {
 pub struct ClaimedTask {
     pub id: String,
     pub args_kwargs: String,
-    /// `len(worker_ids)` tras el claim: contador de intentos (contrato §Claim).
+    /// `len(worker_ids)` after the claim: attempt counter (contract Claim section).
     pub attempts: i64,
 }
 
-/// Conteos para `status`: disponibles (READY reclamables),
-/// en proceso (RUNNING) y completadas (SUCCESSFUL).
+/// Counts for `status`: available (claimable READY),
+/// in-flight (RUNNING) and completed (SUCCESSFUL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
 pub struct QueueStatus {
     pub ready: i64,
@@ -69,9 +69,9 @@ pub struct QueueStatus {
     pub done: i64,
 }
 
-/// Una fila para `list <estado>`.
-/// `enqueued_at` se formatea en SQL (`to_char`) para no añadir
-/// `chrono`/`time` a `sqlx` solo por este listado.
+/// One row for `list <state>`.
+/// `enqueued_at` is formatted in SQL (`to_char`) to avoid adding
+/// `chrono`/`time` to `sqlx` just for this listing.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct ListedTask {
     pub id: String,
@@ -80,10 +80,10 @@ pub struct ListedTask {
     pub enqueued_at: String,
 }
 
-/// Una fila completa para `inspect <UUID>`.
-/// Los `timestamptz` se formatean en SQL (`to_char`, como en `list`)
-/// para no añadir `chrono`/`time` a las dependencias; los nulables
-/// quedan `NULL` -> `None`. Los `jsonb` se seleccionan como `::text`.
+/// One full row for `inspect <UUID>`.
+/// `timestamptz` values are formatted in SQL (`to_char`, as in `list`)
+/// to keep `chrono`/`time` out of the dependencies; nullables
+/// come back `NULL` -> `None`. `jsonb` columns are selected as `::text`.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct InspectedTask {
     pub id: String,
@@ -103,8 +103,8 @@ pub struct InspectedTask {
     pub args_kwargs: String,
 }
 
-/// Lectura del heartbeat para `status`: edad en segundos (frescura) +
-/// `metadata` crudo (el render lo parsea best-effort, lote 7.4).
+/// Heartbeat read for `status`: age in seconds (freshness) +
+/// raw `metadata` (the renderer parses it best-effort).
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Heartbeat {
     pub last_seen: String,
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn task_status_y_list_query_rangos() {
-        // Los literales son los del contrato, sin duplicar strings aqui.
+        // Literals come from the contract, no duplicated strings here.
         assert_eq!(TaskStatus::Ready.as_db_str(), STATUS_READY);
         assert_eq!(TaskStatus::Running.as_db_str(), STATUS_RUNNING);
         assert_eq!(TaskStatus::Done.as_db_str(), STATUS_SUCCESSFUL);

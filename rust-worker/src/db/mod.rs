@@ -1,10 +1,10 @@
 //! PostgreSQL access.
 //!
-//! Port del prototipo (`db/`): exactamente una conexion, autocommit, sin TLS
-//! (BD local). Solo conexion aqui; SQL y queries en `postgres.rs` tras el
-//! trait `store`. La verificacion de privilegios minimo (R-6) tambien vive
-//! aqui: tras conectar, el worker falla alto si el rol no tiene los `GRANT`
-//! de `.env.example`.
+//! Single connection, autocommit, no TLS (local DB). Connections only;
+//! SQL and queries live in `postgres.rs` behind the `store` trait.
+//! The minimum-privilege check (roadmap R-6) also lives here: after
+//! connecting, the worker fails loud if the role lacks the `.env.example`
+//! `GRANT`s.
 
 pub mod models;
 pub mod postgres;
@@ -22,10 +22,10 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::contract::{HEARTBEAT_TABLE, QUEUE_TABLE};
 
-/// Least-privilege que el DSN del worker debe tener (audit 001 §A07, R-6):
-/// `SELECT, UPDATE` en la cola, `INSERT, UPDATE` en el heartbeat
-/// (ver `.env.example`). Orden posicional: `missing_grants` lo usa para
-/// mapear resultados a pares faltantes.
+/// Least privilege the worker DSN must hold (see roadmap R-6):
+/// `SELECT, UPDATE` on the queue, `INSERT, UPDATE` on the heartbeat
+/// (see `.env.example`). Positional order: `missing_grants` maps results
+/// to missing pairs.
 pub const REQUIRED_GRANTS: &[(&str, &str)] = &[
     (QUEUE_TABLE, "SELECT"),
     (QUEUE_TABLE, "UPDATE"),
@@ -33,8 +33,8 @@ pub const REQUIRED_GRANTS: &[(&str, &str)] = &[
     (HEARTBEAT_TABLE, "UPDATE"),
 ];
 
-/// Resultados posicionales del sondeo (`true` = concedido) a pares
-/// `(tabla, privilegio)` faltantes. Funcion pura, testeable sin BD.
+/// Positional probe results (`true` = granted) mapped to missing
+/// `(table, privilege)` pairs. Pure function, testable without a DB.
 pub fn missing_grants(results: &[bool]) -> Vec<(&'static str, &'static str)> {
     REQUIRED_GRANTS
         .iter()
@@ -44,7 +44,7 @@ pub fn missing_grants(results: &[bool]) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// Mensaje accionable para fallo alto: que falta y como concederlo.
+/// Actionable message for a loud failure: what is missing and how to grant it.
 pub fn grant_error_message(current_user: &str, missing: &[(&str, &str)]) -> String {
     let grants: Vec<String> = missing
         .iter()
@@ -64,7 +64,7 @@ pub fn grant_error_message(current_user: &str, missing: &[(&str, &str)]) -> Stri
     )
 }
 
-/// Una sola conexion, autocommit, sin TLS (BD local).
+/// A single connection, autocommit, no TLS (local DB).
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(1)
@@ -73,11 +73,11 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
-/// Verifica least-privilege tras conectar (audit 001 §A07, R-6): sondea
-/// `has_table_privilege(current_user, tabla, priv)` por cada entrada de
-/// `REQUIRED_GRANTS` y falla alto con el `GRANT` accionable si falta algo.
-/// `skip=true` (`PILOTWAVE_SKIP_GRANT_CHECK`) lo omite (best-effort para
-/// sondas ad-hoc); por defecto esta activado.
+/// Verify least privilege after connecting (see roadmap R-6): probe
+/// `has_table_privilege(current_user, table, priv)` for each
+/// `REQUIRED_GRANTS` entry and fail loud with the actionable `GRANT`
+/// when something is missing. `skip=true` (`PILOTWAVE_SKIP_GRANT_CHECK`)
+/// skips it (best-effort for ad-hoc probes); enabled by default.
 pub async fn verify_least_privilege(pool: &PgPool, skip: bool) -> Result<(), String> {
     if skip {
         return Ok(());

@@ -1,9 +1,9 @@
-//! Envío SMTP con `lettre` (PLAN-003 §3.6).
+//! SMTP sending with `lettre`.
 //!
-//! Construye el transporte desde `Config`, envía con el timeout por tarea y
-//! clasifica el error (transitorio vs permanente). El requeue con backoff vive
-//! en `main.rs` + `retry` + `db`. Los adjuntos llegan ya validados desde
-//! `attachments` (policy §3.4 en disco); aquí solo se ensamblan.
+//! Build the transport from `Config`, send with the per-task timeout and
+//! classify the error (transient vs permanent). Requeue with backoff lives
+//! in `main.rs` + `retry` + `db`. Attachments arrive already validated from
+//! `attachments` (on-disk policy); here they are only assembled.
 
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
@@ -15,15 +15,15 @@ use crate::attachments::AttachmentFile;
 use crate::config::Config;
 use crate::contract::EmailContent;
 
-/// Fallo de envío ya clasificado según §3.6.
+/// Already-classified send failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
-    /// `4xx`, timeout, conexión/TLS: reintentable (requeue en el paso siguiente).
+    /// `4xx`, timeout, connection/TLS: retriable (requeued by the caller).
     Transient(String),
-    /// `5xx`: final, sin retry.
+    /// `5xx`: final, no retry.
     Permanent(String),
-    /// El `Message` no se pudo construir (la regex de `payload` y `lettre`
-    /// discrepan en un borde): como una cabecera inválida, sin retry.
+    /// The `Message` could not be built (`payload` and `lettre` disagree on
+    /// an edge): treated as an invalid header, no retry.
     Header(String),
 }
 
@@ -45,9 +45,9 @@ impl SendError {
     }
 }
 
-/// Construye el `Message`. Sin adjuntos: el cuerpo simple de siempre; con
-/// adjuntos: `mixed(base, att1, ...)` donde `base` es el alternative/plain/
-/// html. Los errores de construcción son defectos de cabecera (no de red).
+/// Build the `Message`. Without attachments: the plain single body; with
+/// attachments: `mixed(base, att1, ...)` where `base` is the alternative/plain/
+/// html part. Build errors are header defects (not network errors).
 pub fn build_message(
     from: &Mailbox,
     content: &EmailContent,
@@ -103,9 +103,9 @@ pub fn build_message(
 }
 
 fn transport(config: &Config) -> Result<AsyncSmtpTransport<Tokio1Executor>, SendError> {
-    // Sin TLS solo con opt-in explícito, validado en `Config::from_env`
-    // (`PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true`, solo dev): este
-    // `builder_dangerous` nunca es silencioso (A02, audit 001).
+    // No TLS only with explicit opt-in, validated in `Config::from_env`
+    // (`PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true`, dev-only): this
+    // `builder_dangerous` is never silent.
     let builder = if config.smtp_use_tls {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
             .map_err(|err| SendError::Transient(format!("smtp relay: {err}")))?
@@ -121,9 +121,9 @@ fn transport(config: &Config) -> Result<AsyncSmtpTransport<Tokio1Executor>, Send
         .build())
 }
 
-/// Envía un contenido ya validado con sus adjuntos. El timeout global es
-/// `task_timeout` (§3.6); cubre también el ensamblado (los ficheros ya están
-/// en memoria acotada por la policy).
+/// Send already-validated content with its attachments. The global timeout is
+/// `task_timeout`; it also covers assembly (files are already held in
+/// policy-bounded memory).
 pub async fn send(
     config: &Config,
     content: &EmailContent,

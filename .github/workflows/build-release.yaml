@@ -1,0 +1,260 @@
+# =============================================================================
+# Build & Release — DISPARO EXCLUSIVAMENTE MANUAL (Actions → Run workflow).
+#
+# Cómo dispararlo:
+#   GitHub → Actions → "Build & Release" → Run workflow (branch: main)
+#   - bump_level: "auto" respeta conventional commits (feat→minor, fix→patch…);
+#     "major"/"minor"/"patch" fuerzan ese nivel con `semantic-release version`.
+#   - dry_run: "true" solo imprime la versión que se publicaría
+#     (`version --print`), sin commit, tag ni push.
+#
+# Qué hace:
+#   1. release: `uv run semantic-release version` (bump + tag v{version} + push
+#      a main, como backoffice_tramites) y expone outputs version /
+#      new_release_published. Si no hay conventional commits desde el último
+#      tag, no hay release y los jobs siguientes se saltan.
+#   2. build: checkout FRESCO de main (el commit chore(release) que pushea el
+#      job anterior — lección del front: sin ref:main se hornea la versión
+#      vieja), verifica drift de versión (pyproject == Cargo.toml == tag),
+#      construye wheel musl + sdist con maturin y los sube como artifact.
+#   3. publish: descarga el artifact a dist/, publica en PyPI y luego
+#      `uv run semantic-release publish` crea/actualiza el GitHub Release
+#      v{version} adjuntando dist/* (upload_to_release + dist_glob_patterns).
+#
+# Credenciales / push:
+#   Los checkouts usan `persist-credentials: false`. python-semantic-release
+#   pushea el commit de versión y el tag con su propio token
+#   ([tool.semantic_release.remote] token = GITHUB_TOKEN, ver pyproject.toml),
+#   igual que la receta de backoffice/front — no necesita credenciales
+#   persistidas del checkout. `fetch-depth: 0` donde semantic-release necesita
+#   tags + historia (jobs release y publish).
+#
+# Secrets a configurar en GitHub (Settings → Secrets and variables → Actions):
+#   - NINGUNO obligatorio si PyPI usa Trusted Publishing (OIDC): este
+#     workflow publica con `pypa/gh-action-pypi-publish` sin contraseña y el
+#     job publish tiene `id-token: write`. En PyPI (proyecto `pilotwave` →
+#     Settings → Publishing) registra como publisher: owner/repo
+#     `misaelnieto/pilotwave`, workflow `build-release.yaml`
+#     (sin environment, o con environment si lo configuras abajo).
+#   - PYPI_API_TOKEN (opcional, fallback): si NO hay Trusted Publishing
+#     configurado, crea un API token en PyPI y guárdalo con ese nombre. Hay
+#     DOS steps de publicación condicionales: sin el secret se publica por
+#     OIDC puro (sin input `password`, un string vacío rompería el OIDC);
+#     con el secret se publica con token. Formato del secret: token `pypi-…`
+#     completo (usuario __token__ implícito en la action).
+#     Si el publisher de PyPI se configuró con un environment de GitHub,
+#     añade `environment: <nombre>` al job publish (OIDC lo exige).
+#   - GITHUB_TOKEN: provisto por Actions, no se configura. Requiere que el
+#     repo permita `contents: write` al workflow (Settings → Actions → General
+#     → Workflow permissions: "Read and write permissions").
+#
+# NOTA: no hay trigger `push` a propósito. ci.yml sigue intacto y corre en
+# cada push/PR; este workflow solo corre bajo demanda.
+# =============================================================================
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_level:
+        description: 'Nivel de bump (auto = según conventional commits)'
+        type: choice
+        options: [auto, major, minor, patch]
+        default: auto
+      dry_run:
+        description: 'Solo mostrar la versión sin publicar'
+        type: boolean
+        default: false
+
+# Permisos mínimos por defecto; cada job declara los suyos.
+permissions: {}
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # pushear commit de versión + tag v{version}
+    outputs:
+      version: ${{ steps.semantic.outputs.version }}
+      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
+
+    steps:
+      - name: Validate push prerequisites
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error::GITHUB_TOKEN está vacío. El push del commit de versión + tag lo hace python-semantic-release con su propio token ([tool.semantic_release.remote] token = GITHUB_TOKEN)."
+            exit 1
+          fi
+          echo "GITHUB_TOKEN presente. Requisito: Settings → Actions → General → Workflow permissions = 'Read and write permissions' (si es Read-only, el push del tag fallará)."
+
+      - uses: actions/checkout@v7
+        with:
+          # semantic-release necesita tags + historia completa
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev --frozen
+
+      - name: Run semantic-release
+        id: semantic
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUMP_FLAG=""
+          case "${{ inputs.bump_level }}" in
+            major) BUMP_FLAG="--major" ;;
+            minor) BUMP_FLAG="--minor" ;;
+            patch) BUMP_FLAG="--patch" ;;
+          esac
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN — versión que se publicaría:"
+            # --print calcula el bump sin commit, tag ni push
+            # shellcheck disable=SC2086
+            uv run semantic-release version $BUMP_FLAG --print
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "new_release_published=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          # shellcheck disable=SC2086
+          uv run semantic-release version $BUMP_FLAG
+          NEW_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -n "$NEW_TAG" ] && [ "$PREV_TAG" != "$NEW_TAG" ]; then
+            VERSION=$(echo "$NEW_TAG" | sed 's/^v//')
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "new_release_published=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new release to publish (no conventional commits since $PREV_TAG)"
+            echo "new_release_published=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build wheel (musl) + sdist
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # subir artifact con los dists
+
+    steps:
+      # Checkout de main LATEST (no del SHA que disparó el workflow):
+      # semantic-release pushea chore(release) x.y.z en el job anterior;
+      # sin ref:main el build hornearía pyproject/Cargo 0.1.3 en release 0.1.4.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          # El build solo verifica versiones y compila: basta el snapshot.
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify version matches release (no drift)
+        run: |
+          EXPECTED="${{ needs.release.outputs.version }}"
+          PY_VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          CARGO_VER=$(python3 -c "import tomllib; print(tomllib.load(open('rust-worker/Cargo.toml','rb'))['package']['version'])")
+          echo "release=$EXPECTED pyproject=$PY_VER cargo=$CARGO_VER"
+          if [ "$PY_VER" != "$EXPECTED" ] || [ "$CARGO_VER" != "$EXPECTED" ]; then
+            echo "❌ version drift: pyproject=$PY_VER cargo=$CARGO_VER release=$EXPECTED"
+            exit 1
+          fi
+          echo "✅ version $EXPECTED"
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust toolchain (musl target)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Build wheel + sdist
+        # Misma receta que `just build`, más el sdist para PyPI.
+        run: |
+          uv run maturin build --release \
+            --manifest-path rust-worker/Cargo.toml \
+            --target x86_64-unknown-linux-musl \
+            --out dist
+          uv run maturin sdist \
+            --manifest-path rust-worker/Cargo.toml \
+            --out dist
+          ls -la dist/
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ needs.release.outputs.version }}
+          path: dist/*
+          retention-days: 30
+
+  publish:
+    name: Publish to PyPI + GitHub Release
+    needs: [release, build]
+    if: needs.release.outputs.new_release_published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # semantic-release publish crea/actualiza el Release
+      id-token: write # Trusted Publishing (OIDC) hacia PyPI
+      actions: read # descargar el artifact de dists
+
+    steps:
+      # Checkout del tag exacto + historia (semantic-release publish genera
+      # notas comparando contra el tag anterior).
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --group dev --frozen
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-${{ needs.release.outputs.version }}
+          path: dist
+
+      - name: Publish to PyPI (OIDC Trusted Publishing)
+        # OIDC PURO: NO pasar `password`. Un string vacío (secret inexistente)
+        # se interpreta como contraseña explícita y rompe el OIDC después de
+        # que el tag ya quedó pusheado. Solo corre si NO hay PYPI_API_TOKEN.
+        if: ${{ secrets.PYPI_API_TOKEN == '' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Publish to PyPI (API token fallback)
+        # Solo corre si existe el secret PYPI_API_TOKEN. Ver cabecera.
+        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Publish GitHub Release (attach dists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run semantic-release publish

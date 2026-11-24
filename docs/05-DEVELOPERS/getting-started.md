@@ -84,5 +84,4 @@ PILOTWAVE_ATTACHMENT_ROOTS=/home/user/apps/myapp/media,/home/user/apps/myapp/upl
 Checklist: create the directories in the producer project, mount/copy the
 same paths where the worker runs, keep them absolute, never point them at
 `/`, and restart the worker after changing them. The rule is enforced by
-`pilotwave-worker`; no Python fallback sender ships in v1 (P-5 decided
-owner, paso 8).
+`pilotwave-worker`; no Python fallback sender ships in v1 (P-5 decided).

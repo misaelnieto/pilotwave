@@ -1,6 +1,6 @@
 //! Minimal line-oriented logger: `2026-11-16T10:00:00Z INFO message`.
 //!
-//! PLAN-003 §3.10.6 asks for a line-oriented, level-prefixed file. A full
+//! The daemon log is a line-oriented, level-prefixed file. A full
 //! `tracing` stack would cost more binary size than the worker itself needs,
 //! so we keep it to a few lines until there is a reason not to.
 
@@ -12,15 +12,15 @@ use time::macros::format_description;
 const FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
 
-/// Interruptor global de diagnóstico: solo `debug` lo consulta.
+/// Global diagnostic switch: only `debug` reads it.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// Activa o silencia los mensajes `DEBUG`. Llamar una vez al arrancar.
+/// Enable or silence `DEBUG` messages. Call once at startup.
 pub fn set_verbose(value: bool) {
     VERBOSE.store(value, Ordering::Relaxed);
 }
 
-/// Estado actual del interruptor (para tests).
+/// Current switch state (for tests).
 pub fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
@@ -37,8 +37,8 @@ pub fn error(message: &str) {
     emit("ERROR", message);
 }
 
-/// Diagnóstico ruidoso: solo emite cuando `set_verbose(true)`.
-/// Nunca pasar secretos (passwords, DSN) ni contenido de cuerpos.
+/// Noisy diagnostic: only emits after `set_verbose(true)`.
+/// Never pass secrets (passwords, DSNs) or body contents.
 pub fn debug(message: &str) {
     if is_verbose() {
         emit("DEBUG", message);

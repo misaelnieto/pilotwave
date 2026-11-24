@@ -1,29 +1,29 @@
-//! Escritura del `PilotwaveHeartbeat` del sidecar (PLAN-003 §3.10).
+//! Sidecar `PilotwaveHeartbeat` writes.
 //!
-//! La fila `pilotwave_heartbeat(key='pilotwave_worker')` es la **fuente
-//! canónica** de vida: Django (`get_pilotwave_status`) solo lee esta
-//! fila (§3.10.4, prohibido `ps`/pidfile/`/proc` en request-path) y `status`
-//! la muestra cuando hay BD, degradando a la sonda local si no la hay.
+//! The `pilotwave_heartbeat(key='pilotwave_worker')` row is the canonical
+//! liveness source: Django (`get_pilotwave_status`) only reads this row
+//! (never `ps`/pidfile/`/proc` in the request path) and `status`
+//! shows it when a DB is available, degrading to the local probe otherwise.
 //!
-//! Ritmo: cada ciclo de poll **y** antes/después de cada envío (§3.10: con
-//! una sola conexión y un loop secuencial, un send de 30 s envejecería el
-//! heartbeat más allá del umbral honesto si solo se escribe por ciclo).
-//! El contrato `metadata` es solo-contadores + identidad operativa del
-//! proceso (pid/uptime/rss): nunca recipients, subjects, cuerpos,
-//! `form_data`, textos de error, DSNs ni rutas de adjuntos.
+//! Pace: every poll cycle **and** before/after each send (with a single
+//! connection and a sequential loop, a 30 s send would age the heartbeat
+//! past the honest threshold when written only once per cycle).
+//! The `metadata` contract is counters-only + operational identity of the
+//! process (pid/uptime/rss): never recipients, subjects, bodies,
+//! `form_data`, error texts, DSNs or attachment paths.
 
-/// Clave de la fila: reutiliza el contrato (fuente unica).
+/// Row key: reuses the contract (single source).
 pub use crate::contract::HEARTBEAT_KEY;
 
-/// Versión del esquema `metadata` (arranca en 1, como el payload §3.4).
+/// `metadata` schema version (starts at 1).
 pub const HEARTBEAT_VERSION: u32 = 1;
 
-/// Umbral stale: `TASK_TIMEOUT 30` + `POLL_MAX 5` + margen. Espejo del
-/// `PILOTWAVE_STALE_AFTER_SECS = 90` de Django (la regla genérica de
-/// 10 minutos NO aplica a esta clave).
+/// Stale threshold: `TASK_TIMEOUT 30` + `POLL_MAX 5` + margin. Mirrors the
+/// Django `PILOTWAVE_STALE_AFTER_SECS = 90` (the generic 10-minute rule
+/// does NOT apply to this key).
 pub const STALE_AFTER_SECS: i64 = 90;
 
-/// `fresh` si `age_secs` está dentro del umbral, `stale` si no.
+/// `fresh` when `age_secs` is within the threshold, `stale` otherwise.
 pub fn freshness(age_secs: i64) -> &'static str {
     if age_secs <= STALE_AFTER_SECS {
         "fresh"
@@ -34,15 +34,15 @@ pub fn freshness(age_secs: i64) -> &'static str {
 
 /// Contadores e identidad operativa para una escritura de heartbeat.
 /// Todo sale de la BD (conteos) o de `/proc` propio (best-effort);
-/// ningún campo porta PII.
+/// no field carries PII.
 pub struct BeatCounters {
-    /// `COUNT READY` reclamable visto en este ciclo (§3.10.1 `due_depth`).
+    /// Claimable `COUNT READY` seen in this cycle (`due_depth`).
     pub queue_depth_seen: i64,
     /// Tareas procesadas desde el arranque del proceso.
     pub tasks_processed: u64,
-    /// UUID de la última tarea tocada (solo el id, nunca el contenido).
+    /// UUID of the last touched task (the id only, never the content).
     pub last_task_id: Option<String>,
-    /// Último `pilotwave_worker.*` (código, nunca el detalle con texto atacante).
+    /// Last `pilotwave_worker.*` (code only, never attacker-text detail).
     pub last_error_code: Option<String>,
     /// PID propio (cruce con la sonda local de `status`).
     pub pid: u32,
@@ -52,8 +52,8 @@ pub struct BeatCounters {
     pub rss_kb: Option<u64>,
 }
 
-/// Serializa `metadata` como JSON (claves ordenadas por construcción).
-/// Función pura para poder probarla sin BD.
+/// Serialize `metadata` as JSON (keys ordered by construction).
+/// Pure function for DB-free testing.
 pub fn render_metadata(c: &BeatCounters) -> String {
     serde_json::json!({
         "version": HEARTBEAT_VERSION,
@@ -95,7 +95,7 @@ mod tests {
         assert_eq!(v["pid"], 1234);
         assert_eq!(v["uptime_secs"], 3723);
         assert_eq!(v["rss_kb"], 4192);
-        // Ausentes => null sin pánico (best-effort de /proc).
+        // Missing => null without panicking (/proc best-effort).
         let v: serde_json::Value = serde_json::from_str(&render_metadata(&BeatCounters {
             queue_depth_seen: 0,
             tasks_processed: 0,

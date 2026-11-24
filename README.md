@@ -4,7 +4,7 @@
 
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue)](pyproject.toml)
 [![Django 6](https://img.shields.io/badge/django-6.x-green)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![Postgres 18](https://img.shields.io/badge/postgres-18-blue)](compose.yaml)
 
 Pilotwave is a two-part email outbox for Django:
@@ -204,4 +204,4 @@ Docs entrypoint: [docs/README.md](docs/README.md). Contract: [contracts/CONTRACT
 
 ## License
 
-MIT — see `license = { text = "MIT" }` in [pyproject.toml](pyproject.toml).
+MIT — see [LICENSE](LICENSE).

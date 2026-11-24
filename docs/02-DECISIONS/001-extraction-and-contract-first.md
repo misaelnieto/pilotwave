@@ -9,8 +9,7 @@ date: 2026-11-19
 
 ## Context
 
-The `pilotwave-worker` prototype lives inside the AIPH CRM monolith (worktree
-`feat/rust-email-worker`). It works and is being extracted into its own repo.
+The `pilotwave-worker` prototype was ported from an internal prototype. It works and is extracted into its own repo.
 Django and Rust both encode assumptions about the queue schema and payload;
 changing either side first creates drift.
 

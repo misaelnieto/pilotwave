@@ -1,7 +1,7 @@
 -- REFERENCE MIRROR — NOT A MIGRATION APPLIED BY PILOTWAVE
 --
 -- Mirrors the schema of `django-tasks-db==0.13.0` as verified against a real
--- migrated database (see PLAN-003 §3.2 in the source worktree). The table is
+-- migrated database. The table is
 -- created and migrated by Django via the `django_tasks_db` app; Pilotwave
 -- never applies this file. It exists so the Rust worker's SQL and the Python
 -- round-trip test can be reviewed against one visible schema.

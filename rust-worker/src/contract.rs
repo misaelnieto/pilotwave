@@ -5,8 +5,8 @@
 //! round-trip test.
 
 // Several constants describe the full worker (claim loop, finalization,
-// heartbeat) which is ported after this skeleton is green. Keep them visible
-// now so the contract is executable documentation.
+// heartbeat). Keep them visible so the contract stays executable
+// documentation.
 #![allow(dead_code)]
 
 use serde_json::Value;
@@ -21,7 +21,7 @@ pub const STATUS_RUNNING: &str = "RUNNING";
 pub const STATUS_SUCCESSFUL: &str = "SUCCESSFUL";
 pub const STATUS_FAILED: &str = "FAILED";
 
-/// `run_after` value meaning "not deferred" (contract §Queue row).
+/// `run_after` value meaning "not deferred" (contract Queue row section).
 pub const RUN_AFTER_SENTINEL: &str = "9999-01-01T00:00:00Z";
 pub const HEARTBEAT_KEY: &str = "pilotwave_worker";
 
@@ -41,9 +41,9 @@ pub const FAILURE_SMTP_EXHAUSTED: &str = "pilotwave_worker.smtp_exhausted";
 // backwards compatibility with existing FAILED rows and monitors).
 // No version gate: any `schema` key, in `kwargs` or at the root, is ignored.
 
-/// Límite de `traceback` en bytes (contrato §Failure codes: redaccion +
-/// truncado 4 KiB = 4096; decision owner Lote R).
-/// Se trunca por borde de char para no partir UTF-8.
+/// `traceback` cap in bytes (contract Failure codes: redaction +
+/// truncation to 4096 bytes).
+/// Truncated on a char boundary to never split UTF-8.
 pub const TRACEBACK_MAX_BYTES: usize = 4096;
 
 /// A validated email payload, ready for the sender.

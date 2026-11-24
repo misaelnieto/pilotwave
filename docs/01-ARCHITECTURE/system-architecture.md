@@ -23,7 +23,7 @@ An installable Django app exposing:
   Django Tasks API (`mail_notification.enqueue(...)`), on the
   `pilotwave.email` queue. The worker validates every row.
 - `PilotwaveHeartbeat`: the one model Pilotwave owns.
-- No Python sender ships in v1 (P-5 decided owner, paso 8): the `pilotwave.email`
+- No Python sender ships in v1 (P-5 decided): the `pilotwave.email`
   queue is drained only by `pilotwave-worker`.
 
 ### Rust binary (`rust-worker/`)
