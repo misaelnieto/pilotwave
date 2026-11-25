@@ -5,7 +5,6 @@ edition = "2024"
 description = "Rust worker that drains django.tasks-db queues created by Pilotwave"
 license = "MIT"
 repository = "https://github.com/misaelnieto/pilotwave"
-homepage = "https://github.com/misaelnieto/pilotwave"
 documentation = "https://github.com/misaelnieto/pilotwave/blob/main/docs/README.md"
 keywords = ["email", "postgres", "django", "tasks", "worker"]
 categories = ["email"]
