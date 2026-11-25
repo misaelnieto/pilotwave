@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.2 (2026-11-25)
+
+### Bug Fixes
+
+- Publish-gh must checkout main, tag leaves detached HEAD with no release group
+  ([`a2f0a1c`](https://github.com/misaelnieto/pilotwave/commit/a2f0a1c8581491ae825cf0f8103b313cd5d63b9c))
+
+
 ## v0.2.1 (2026-11-25)
 
 ### Bug Fixes

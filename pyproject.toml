@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pilotwave"
-version = "0.2.1"
+version = "0.2.2"
 description = "Django 6.x task producer + Rust worker for low-memory email delivery (Postgres queue, no broker)"
 readme = "README.md"
 authors = [
