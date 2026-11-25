@@ -164,9 +164,13 @@ jobs:
       actions: read # download the dists artifact
 
     steps:
+      # Checkout main (NOT the tag): semantic-release publish must run on the
+      # release branch. Checking out v{version} leaves a detached HEAD, which
+      # cannot match any release group and fails with exit 1. main is already
+      # at the chore(release) commit pushed by the release job.
       - uses: actions/checkout@v7
         with:
-          ref: v${{ needs.release.outputs.version }}
+          ref: main
           # semantic-release publish needs tags + history for notes/changelog
           fetch-depth: 0
           persist-credentials: false
