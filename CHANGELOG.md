@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-11-25)
+
+### Bug Fixes
+
+- Harden build-release workflow (tag build, split GH/PyPI publishes, OIDC-only)
+  ([`1115773`](https://github.com/misaelnieto/pilotwave/commit/1115773e3feabc1e59d7349aa365b448fcda40e3))
+
+
 ## v0.2.0 (2026-11-25)
 
 ### Bug Fixes
