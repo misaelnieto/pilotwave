@@ -34,6 +34,9 @@ jobs:
         with:
             activate-environment: true
 
+      - name: Setup .env for CI
+        run: cp .env.example .env
+
       - name: Prerequisites
         run: just pre-install-check
 

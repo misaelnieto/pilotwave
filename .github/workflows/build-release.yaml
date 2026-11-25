@@ -215,6 +215,11 @@ jobs:
       contents: write # semantic-release publish crea/actualiza el Release
       id-token: write # Trusted Publishing (OIDC) hacia PyPI
       actions: read # descargar el artifact de dists
+    env:
+      # Exponer el secret como env para poder ramificar en `if:`:
+      # `secrets` no está permitido en `if:` (workflow inválido -> run push
+      # fantasma de 0s en failure), `env` sí.
+      HAS_PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
 
     steps:
       # Checkout del tag exacto + historia (semantic-release publish genera
@@ -243,12 +248,12 @@ jobs:
         # OIDC PURO: NO pasar `password`. Un string vacío (secret inexistente)
         # se interpreta como contraseña explícita y rompe el OIDC después de
         # que el tag ya quedó pusheado. Solo corre si NO hay PYPI_API_TOKEN.
-        if: ${{ secrets.PYPI_API_TOKEN == '' }}
+        if: env.HAS_PYPI_API_TOKEN == ''
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Publish to PyPI (API token fallback)
         # Solo corre si existe el secret PYPI_API_TOKEN. Ver cabecera.
-        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+        if: env.HAS_PYPI_API_TOKEN != ''
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
