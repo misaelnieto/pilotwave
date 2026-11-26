@@ -106,19 +106,22 @@ fn transport(config: &Config) -> Result<AsyncSmtpTransport<Tokio1Executor>, Send
     // No TLS only with explicit opt-in, validated in `Config::from_env`
     // (`PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true`, dev-only): this
     // `builder_dangerous` is never silent.
-    let builder = if config.smtp_use_tls {
+    let mut builder = if config.smtp_use_tls {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
             .map_err(|err| SendError::Transient(format!("smtp relay: {err}")))?
     } else {
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
     };
-    Ok(builder
-        .port(config.smtp_port)
-        .credentials(Credentials::new(
-            config.smtp_user.clone(),
-            config.smtp_password.clone(),
-        ))
-        .build())
+    builder = builder.port(config.smtp_port);
+    // No AUTH only when both are absent (validated in `Config::from_env`:
+    // loopback + plaintext + anonymous opt-ins, dev-only). Half credentials
+    // here would mean `Config` validation was bypassed: fail closed.
+    if let (Some(user), Some(password)) = (&config.smtp_user, &config.smtp_password) {
+        builder = builder.credentials(Credentials::new(user.clone(), password.clone()));
+    } else if config.smtp_user.is_some() || config.smtp_password.is_some() {
+        return Err(SendError::Transient("half credentials".into()));
+    }
+    Ok(builder.build())
 }
 
 /// Send already-validated content with its attachments. The global timeout is
@@ -228,6 +231,56 @@ mod tests {
         assert_eq!(
             SendError::Header("x".into()).code(),
             "pilotwave_worker.header_violation"
+        );
+    }
+
+    /// Minimal `Config` for transport construction (no env, no DB).
+    fn transport_config(user: Option<&str>, password: Option<&str>) -> Config {
+        Config {
+            database_url: "postgres://u:p@127.0.0.1/db".to_owned(),
+            database_url_ro: None,
+            worker_id: "test".to_owned(),
+            queue_name: "pilotwave.email".to_owned(),
+            backend_name: "default".to_owned(),
+            task_paths: vec!["pilotwave.tasks.mail_notification".to_owned()],
+            poll_min: std::time::Duration::from_millis(1500),
+            poll_max: std::time::Duration::from_millis(5000),
+            task_timeout: std::time::Duration::from_secs(30),
+            max_attempts: 5,
+            recycle_n: 5_000,
+            smtp_host: "127.0.0.1".to_owned(),
+            smtp_port: 1025,
+            smtp_use_tls: false,
+            smtp_user: user.map(str::to_owned),
+            smtp_password: password.map(str::to_owned),
+            attachment_roots: Vec::new(),
+            from: "CRM <crm@example.com>".parse().unwrap(),
+            skip_grant_check: false,
+            pid_file: None,
+            log_file: None,
+        }
+    }
+
+    #[test]
+    fn transport_construye_con_y_sin_credenciales() {
+        // With AUTH: credentials applied, transport builds (no connection).
+        assert!(
+            transport(&transport_config(Some("user"), Some("secret"))).is_ok(),
+            "con AUTH debe construir"
+        );
+        // Without AUTH (both absent, validated upstream): builds as well.
+        assert!(
+            transport(&transport_config(None, None)).is_ok(),
+            "sin AUTH debe construir"
+        );
+        // Half credentials (bypassed `Config` validation): fail closed.
+        assert!(
+            transport(&transport_config(Some("user"), None)).is_err(),
+            "medio-creds deben fallar"
+        );
+        assert!(
+            transport(&transport_config(None, Some("secret"))).is_err(),
+            "medio-creds deben fallar"
         );
     }
 }

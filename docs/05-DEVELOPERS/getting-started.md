@@ -85,3 +85,29 @@ Checklist: create the directories in the producer project, mount/copy the
 same paths where the worker runs, keep them absolute, never point them at
 `/`, and restart the worker after changing them. The rule is enforced by
 `pilotwave-worker`; no Python fallback sender ships in v1 (P-5 decided).
+
+### Dev SMTP without AUTH (Mailcrab)
+
+Mailcrab (`just dev-up`, SMTP `:1025`) advertises no AUTH extension, so the
+worker cannot log in to it. For local dev only, run without credentials:
+leave `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` empty (whitespace = absent)
+and set both opt-ins:
+
+```dotenv
+EMAIL_HOST=localhost
+EMAIL_PORT=1025
+EMAIL_USE_TLS=false
+PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true
+PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true
+```
+
+Rules (fail loud, see ADR `003-anonymous-smtp-opt-in`): user+pass go together
+(only one set = startup error); no AUTH is accepted only when the host is
+loopback (`localhost`/`127.*`/`::1`) **and** `EMAIL_USE_TLS=false` (with the
+plaintext opt-in) **and** `PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true`. A typo in the
+host fails closed instead of sending unauthenticated mail elsewhere. The
+worker logs a `WARNING ... sin AUTH` on stderr at startup. Never enable the
+anonymous flag outside dev/loopback.
+
+Booleans are `django-environ`-style (case-insensitive): `true`/`1`/`yes`/`y`/
+`on` and `false`/`0`/`no`/`n`/`off`; any other value is a startup error.

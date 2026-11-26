@@ -1,11 +1,13 @@
 """Accept-all fake SMTP server for the memory benchmark (stdlib only).
 
-Why not mailcrab:1025? ``pilotwave-worker`` always sends SMTP credentials
-(``mailer.rs`` sets them unconditionally), but mailcrab advertises no AUTH
-extension, so every send fails transient and nothing ever drains. This
+Why not mailcrab:1025 by default? Mailcrab advertises no AUTH extension;
+since ADR 003 the worker supports no-AUTH against loopback with
+``PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true`` (plus ``EMAIL_USE_TLS=false`` +
+``PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true``), so mailcrab would drain. This
 server advertises ``AUTH PLAIN LOGIN``, accepts any credentials, and also
 accepts unauthenticated senders — so the minimal Python baseline (no login)
-and the Rust worker (login) both drain against it.
+and the Rust worker (login) both drain against it, and the benchmark keeps
+exercising the AUTH path.
 
 Usage: ``.venv/bin/python benchmark/fake_smtp.py --port 1026 [--mailbox DIR]``
 Prints ``READY <port>`` on stdout when listening. Stores one ``*.eml`` per

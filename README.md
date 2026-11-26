@@ -149,6 +149,25 @@ DEFAULT_FROM_EMAIL="App <noreply@example.com>"
 
 Full reference: [.env.example](.env.example).
 
+### Dev without SMTP AUTH (Mailcrab)
+
+Mailcrab (`just dev-up`, SMTP on `:1025`, UI on `:1080`) advertises no
+AUTH extension. For local dev only, leave `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD`
+empty and set both opt-ins (loopback + `EMAIL_USE_TLS=false` required, anything
+else fails loud — see ADR [003](docs/02-DECISIONS/003-anonymous-smtp-opt-in.md)):
+
+```dotenv
+EMAIL_HOST=localhost
+EMAIL_PORT=1025
+EMAIL_USE_TLS=false
+PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true
+PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true
+```
+
+Never set `PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true` in production: without AUTH,
+anyone who can reach the SMTP host can send mail as you (egress note in
+[SECURITY.md](SECURITY.md)).
+
 ## Configuration
 
 | Key | Purpose | Default |
@@ -160,8 +179,9 @@ Full reference: [.env.example](.env.example).
 | `PILOTWAVE_POLL_MIN_MS` / `MAX_MS` | Backoff when queue empty | `1500` / `5000` |
 | `PILOTWAVE_MAX_ATTEMPTS` | Transient SMTP retries before `smtp_exhausted` | `5` |
 | `PILOTWAVE_ATTACHMENT_ROOTS` | Absolute prefixes; empty = deny all | fail-closed, no fallback |
-| `EMAIL_HOST/PORT/USE_TLS/HOST_USER/HOST_PASSWORD` | SMTP used by Rust worker | required |
+| `EMAIL_HOST/PORT/USE_TLS/HOST_USER/HOST_PASSWORD` | SMTP used by Rust worker (user+pass together; blank = absent) | required, unless dev no-AUTH below |
 | `PILOTWAVE_ALLOW_PLAINTEXT_SMTP` | Allow `USE_TLS=false` (dev only, fail-loud in prod) | `false` |
+| `PILOTWAVE_ALLOW_ANONYMOUS_SMTP` | Allow SMTP without AUTH, loopback + `USE_TLS=false` only (dev only, Mailcrab) | `false` |
 | `PILOTWAVE_PID_FILE` / `LOG_FILE` | `--bg` daemon files | unset (foreground) |
 
 Production roles (see [.env.example](.env.example)):

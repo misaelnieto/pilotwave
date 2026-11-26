@@ -314,10 +314,17 @@ impl Worker {
             "mensaje id={} kind={kind} to={}",
             task.id, content.to
         ));
-        // Without `smtp_password`: connection parameters only.
+        // Without AUTH: connection parameters only, never secrets.
         logging::debug(&format!(
             "smtp host={} port={} tls={} user={}",
-            config.smtp_host, config.smtp_port, config.smtp_use_tls, config.smtp_user
+            config.smtp_host,
+            config.smtp_port,
+            config.smtp_use_tls,
+            config
+                .smtp_user
+                .as_deref()
+                .map(|_| "<redacted>")
+                .unwrap_or("(sin-auth)")
         ));
         let started = std::time::Instant::now();
         match mailer::send(config, &content, &files).await {

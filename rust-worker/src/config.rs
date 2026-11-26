@@ -110,8 +110,10 @@ pub struct Config {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_use_tls: bool,
-    pub smtp_user: String,
-    pub smtp_password: String,
+    /// `None` = no AUTH (only allowed loopback + plaintext opt-ins, dev).
+    pub smtp_user: Option<String>,
+    /// `None` = no AUTH. Redacted in `Debug` either way.
+    pub smtp_password: Option<String>,
     /// Allowed prefixes for attachments. Fail-closed: without
     /// `PILOTWAVE_ATTACHMENT_ROOTS` the list is empty and every file send
     /// is rejected. No `MEDIA_ROOT` fallback (not even in dev):
@@ -150,7 +152,7 @@ impl std::fmt::Debug for Config {
             .field("smtp_host", &self.smtp_host)
             .field("smtp_port", &self.smtp_port)
             .field("smtp_use_tls", &self.smtp_use_tls)
-            .field("smtp_user", &self.smtp_user)
+            .field("smtp_user", &smtp_user_display(&self.smtp_user))
             .field("smtp_password", &"<redacted>")
             .field("attachment_roots", &self.attachment_roots)
             .field("from", &self.from)
@@ -237,7 +239,10 @@ impl Config {
             return Err("PILOTWAVE_RECYCLE_N must be >= 1".into());
         }
 
-        let smtp_host = env.required("EMAIL_HOST")?;
+        let smtp_host = env.required("EMAIL_HOST")?.trim().to_owned();
+        if smtp_host.is_empty() {
+            return Err("EMAIL_HOST must not be empty".into());
+        }
         let smtp_port = match env.get("EMAIL_PORT") {
             Some(raw) => raw
                 .parse::<u16>()
@@ -264,8 +269,54 @@ impl Config {
                  in cleartext (dev-only, never in production)."
             );
         }
-        let smtp_user = env.required("EMAIL_HOST_USER")?;
-        let smtp_password = env.required("EMAIL_HOST_PASSWORD")?;
+        let smtp_user = env
+            .get("EMAIL_HOST_USER")
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let smtp_password = env
+            .get("EMAIL_HOST_PASSWORD")
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        match (&smtp_user, &smtp_password) {
+            (Some(_), Some(_)) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(
+                    "EMAIL_HOST_USER and EMAIL_HOST_PASSWORD must both be set or both \
+                    be absent (got only one)"
+                        .into(),
+                );
+            }
+            (None, None) => {
+                // No AUTH: only loopback + plaintext, both explicitly opted in.
+                if !smtp_host_is_loopback(&smtp_host) {
+                    return Err(
+                        "SMTP without credentials is only allowed against a loopback host \
+                        (localhost/127.*/::1) with EMAIL_USE_TLS=false, \
+                        PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true and \
+                        PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true"
+                            .into(),
+                    );
+                }
+                if smtp_use_tls {
+                    return Err(
+                        "SMTP without credentials requires EMAIL_USE_TLS=false with \
+                        PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true and \
+                        PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true (dev/loopback only)"
+                            .into(),
+                    );
+                }
+                if !env.boolean("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", false)? {
+                    return Err("SMTP without credentials requires \
+                        PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true (dev/loopback only, \
+                        with EMAIL_USE_TLS=false and PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true)"
+                        .into());
+                }
+                eprintln!(
+                    "WARNING pilotwave-worker: SMTP without AUTH against {smtp_host} \
+                     (PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true, dev/loopback only)."
+                );
+            }
+        }
         // Comma-separated list from `PILOTWAVE_ATTACHMENT_ROOTS`. No
         // `MEDIA_ROOT` fallback, not even in dev: empty means deny-all
         // (fail-closed). Wiring explicit roots is the
@@ -362,6 +413,31 @@ fn dsn_host(url: &str) -> &str {
 fn dsn_host_is_loopback(url: &str) -> bool {
     let host = dsn_host(url).to_ascii_lowercase();
     host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+/// SMTP host loopback check for the no-AUTH case (dev, Mailcrab).
+fn smtp_host_is_loopback(host: &str) -> bool {
+    let lower = host.trim().to_ascii_lowercase();
+    let bare = lower
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&lower);
+    if bare == "localhost" || bare == "::1" {
+        return true;
+    }
+    // 127.0.0.0/8, digits and dots only (no DNS suffixes).
+    bare.strip_prefix("127.").is_some_and(|rest| {
+        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    })
+}
+
+/// Never leak the SMTP user: redacted when set, explicit marker when absent.
+fn smtp_user_display(user: &Option<String>) -> &'static str {
+    if user.is_some() {
+        "<redacted>"
+    } else {
+        "(sin-auth)"
+    }
 }
 
 /// Optional absolute-path variable: absent/empty => `None`;
@@ -617,6 +693,242 @@ mod tests {
         assert!(!cfg.smtp_use_tls);
         // TLS stays the default.
         assert!(config_with(&[]).unwrap().smtp_use_tls);
+    }
+
+    /// `Env` without SMTP credentials (both absent), plus `extra` overrides.
+    fn config_sin_auth(extra: &[(&str, &str)]) -> Result<Config, String> {
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_USER" && *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        Config::from_env(&Env {
+            values,
+            read_process_env: false,
+        })
+    }
+
+    /// Loopback dev combo: no AUTH, no TLS, both opt-ins.
+    fn loopback_sin_auth(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = vec![
+            ("EMAIL_HOST", "localhost"),
+            ("EMAIL_USE_TLS", "false"),
+            ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
+            ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "true"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        out.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        out
+    }
+
+    #[test]
+    fn smtp_con_auth_ok_y_sin_auth_loopback_ok() {
+        // With AUTH (both set): ok, values kept.
+        let cfg = config_with(&[]).unwrap();
+        assert_eq!(cfg.smtp_user.as_deref(), Some("user"));
+        assert_eq!(cfg.smtp_password.as_deref(), Some("secret"));
+        // No AUTH + loopback + both opt-ins: ok, both None.
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_USER" && *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(loopback_sin_auth(&[]));
+        let cfg = Config::from_env(&Env {
+            values,
+            read_process_env: false,
+        })
+        .unwrap();
+        assert_eq!(cfg.smtp_user, None);
+        assert_eq!(cfg.smtp_password, None);
+    }
+
+    #[test]
+    fn smtp_solo_uno_falla_alto() {
+        // Only user, no password: fatal (remote host, TLS on).
+        assert!(config_sin_auth(&[("EMAIL_HOST_USER", "solo-uno")]).is_err());
+        // Only password, no user: fatal.
+        assert!(config_sin_auth(&[("EMAIL_HOST_PASSWORD", "solo-una")]).is_err());
+        // Same on loopback without TLS: still fatal (half credentials).
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(loopback_sin_auth(&[]));
+        assert!(
+            Config::from_env(&Env {
+                values,
+                read_process_env: false
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn smtp_sin_auth_remoto_o_con_tls_falla() {
+        // Remote host without AUTH: fatal even with both opt-ins.
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "smtp.example.com"),
+                ("EMAIL_USE_TLS", "false"),
+                ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
+                ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "true"),
+            ])
+            .is_err()
+        );
+        // Loopback without AUTH but TLS on: fatal.
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "localhost"),
+                ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "true"),
+            ])
+            .is_err()
+        );
+        // Loopback + plaintext but anonymous opt-in missing: fatal.
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "localhost"),
+                ("EMAIL_USE_TLS", "false"),
+                ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
+            ])
+            .is_err()
+        );
+        // Loopback + anonymous but plaintext opt-in missing: fatal.
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "localhost"),
+                ("EMAIL_USE_TLS", "false"),
+                ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "true"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn smtp_credenciales_en_blanco_equivalen_a_ausentes() {
+        // Whitespace-only on both sides == absent: loopback combo passes.
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_USER" && *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(loopback_sin_auth(&[
+            ("EMAIL_HOST_USER", "   "),
+            ("EMAIL_HOST_PASSWORD", "\t "),
+        ]));
+        let cfg = Config::from_env(&Env {
+            values,
+            read_process_env: false,
+        })
+        .unwrap();
+        assert_eq!(cfg.smtp_user, None);
+        // Whitespace user + real password: half credentials, fatal.
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST_USER", "   "),
+                ("EMAIL_HOST_PASSWORD", "secreta"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn smtp_host_loopback_acepta_variantes() {
+        assert!(smtp_host_is_loopback("localhost"));
+        assert!(smtp_host_is_loopback("LOCALHOST"));
+        assert!(smtp_host_is_loopback("  localhost  "));
+        assert!(smtp_host_is_loopback("127.0.0.1"));
+        assert!(smtp_host_is_loopback("127.1.2.3"));
+        assert!(smtp_host_is_loopback("::1"));
+        assert!(smtp_host_is_loopback("[::1]"));
+        assert!(smtp_host_is_loopback("[127.0.0.1]"));
+        assert!(!smtp_host_is_loopback("smtp.example.com"));
+        assert!(!smtp_host_is_loopback("127.0.0.1.evil.com"));
+        assert!(!smtp_host_is_loopback(""));
+        // Bordes: puerto/scheme/sufijos no son loopback puro.
+        assert!(!smtp_host_is_loopback("localhost:1025"));
+        assert!(!smtp_host_is_loopback("smtp://localhost"));
+        assert!(!smtp_host_is_loopback("localhost."));
+        assert!(!smtp_host_is_loopback("127."));
+        assert!(!smtp_host_is_loopback("127.a"));
+        assert!(!smtp_host_is_loopback("0.0.0.0"));
+    }
+
+    #[test]
+    fn smtp_sin_auth_borde_bandera_y_puerto() {
+        // Flag anónimo con valor no booleano: error (estilo django-environ).
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "localhost"),
+                ("EMAIL_USE_TLS", "false"),
+                ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
+                ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "quizas"),
+            ])
+            .is_err()
+        );
+        // EMAIL_PORT con whitespace: error (no se hace trim, falla alto).
+        assert!(
+            config_sin_auth(&[
+                ("EMAIL_HOST", "localhost"),
+                ("EMAIL_PORT", " 1025 "),
+                ("EMAIL_USE_TLS", "false"),
+                ("PILOTWAVE_ALLOW_PLAINTEXT_SMTP", "true"),
+                ("PILOTWAVE_ALLOW_ANONYMOUS_SMTP", "true"),
+            ])
+            .is_err()
+        );
+        // EMAIL_HOST con espacios alrededor hace trim y pasa en loopback.
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_USER" && *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(loopback_sin_auth(&[("EMAIL_HOST", "  localhost  ")]));
+        let cfg = Config::from_env(&Env {
+            values,
+            read_process_env: false,
+        })
+        .unwrap();
+        assert_eq!(cfg.smtp_host, "localhost");
+        // EMAIL_HOST vacío o solo-blancos: error.
+        assert!(config_sin_auth(&[("EMAIL_HOST", "   ")]).is_err());
+    }
+
+    #[test]
+    fn debug_sin_auth_no_filtra_y_marca() {
+        // With AUTH: user redacted, password never shown.
+        let shown = format!("{:?}", config_with(&[]).unwrap());
+        assert!(!shown.contains("secret"));
+        assert!(!shown.contains("\"user\""));
+        // Without AUTH: explicit marker, still no password.
+        let mut values: Vec<(String, String)> = base_vars()
+            .into_iter()
+            .filter(|(k, _)| *k != "EMAIL_HOST_USER" && *k != "EMAIL_HOST_PASSWORD")
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        values.extend(loopback_sin_auth(&[]));
+        let shown = format!(
+            "{:?}",
+            Config::from_env(&Env {
+                values,
+                read_process_env: false
+            })
+            .unwrap()
+        );
+        assert!(shown.contains("(sin-auth)"));
+        assert!(!shown.contains("secret"));
     }
 
     #[test]

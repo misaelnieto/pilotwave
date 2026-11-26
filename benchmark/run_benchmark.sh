@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Memory benchmark: Rust pilotwave-worker vs minimal Python baseline.
-# Both workers drain the same 100 READY rows via SMTP to mailcrab,
-# each measured idle (empty queue 60 s) + draining 100 tasks.
+# Both workers drain the same 100 READY rows via SMTP to the accept-all
+# fake SMTP (benchmark/fake_smtp.py on 1026), each measured idle
+# (empty queue 60 s) + draining 100 tasks.
 #
 # Usage: ./benchmark/run_benchmark.sh   (or: just benchmark)
 # Knobs: IDLE_SECS=60 TASKS_CSV=benchmark/tasks_100.csv
@@ -28,10 +29,11 @@ export PILOTWAVE_ID=pilotwave-bench
 export PILOTWAVE_POLL_MIN_MS=100
 export PILOTWAVE_POLL_MAX_MS=200
 export EMAIL_HOST=localhost
-# NOT 1025/mailcrab: pilotwave-worker always sends SMTP credentials, but
-# mailcrab advertises no AUTH extension, so every Rust send fails transient
-# and the queue never drains. benchmark/fake_smtp.py accepts any AUTH (and
-# no-auth senders, for the Python baseline) and archives deliveries.
+# Port 1026/fake SMTP (not 1025/mailcrab): mailcrab advertises no AUTH, so it
+# would need PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true (ADR 003, loopback-only dev
+# path). The benchmark keeps benchmark/fake_smtp.py — it accepts any AUTH
+# (and no-auth senders, for the Python baseline) and archives deliveries,
+# so the Rust side keeps exercising the AUTH path.
 export EMAIL_PORT=1026
 export EMAIL_USE_TLS=false
 export PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true

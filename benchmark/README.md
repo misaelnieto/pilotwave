@@ -10,10 +10,11 @@ via SMTP to the benchmark's accept-all fake SMTP server
 (`benchmark/fake_smtp.py` on port 1026), mark it `SUCCESSFUL`, upsert
 the `pilotwave_heartbeat` row.
 
-Why a fake SMTP instead of mailcrab:1025? `pilotwave-worker` always
-sends SMTP credentials, but mailcrab advertises no AUTH extension, so
-every Rust send fails transient and the queue never drains. The fake
-server advertises `AUTH PLAIN LOGIN` and accepts anything (archiving
+Why a fake SMTP instead of mailcrab:1025? Mailcrab advertises no AUTH
+extension; since ADR 003 the worker can drain it with
+`PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true` (loopback + plaintext opt-ins), but
+the benchmark keeps the fake server so it keeps exercising the AUTH path.
+The fake advertises `AUTH PLAIN LOGIN` and accepts anything (archiving
 deliveries under `benchmark/results/mail/`); it also accepts
 unauthenticated senders for the Python baseline.
 

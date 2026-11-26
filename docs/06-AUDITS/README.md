@@ -9,3 +9,4 @@ category with file evidence, and follow-up debt (R-IDs) tracked in
 | ID | Date | Scope | Baseline |
 |----|------|-------|----------|
 | [001](001-owasp-top10-2026-11-23.md) | 2026-11-23 | Django producer + Rust worker, planted-row model | OWASP Top 10 2021 |
+| [002](002-anonymous-smtp-egress-note.md) | 2026-11-26 | Addendum: anonymous-SMTP egress (ADR 003) | — |
