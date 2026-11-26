@@ -54,7 +54,13 @@ dev = [
 [tool.maturin]
 # Ship the Rust binary inside the wheel, installed into the venv's bin/ so
 # `uv add pilotwave` also provides the `pilotwave-worker` executable.
+# NOTE: `bindings = "bin"` alone ships ONLY the binary (as
+# `<name>.data/scripts/...`) and silently ignores `python/`. `python-source`
+# tells maturin to also package the pure-Python `pilotwave` module (and to
+# include `python/` in the sdist), so one wheel provides both
+# `import pilotwave` and the `pilotwave-worker` executable.
 bindings = "bin"
+python-source = "python"
 manifest-path = "rust-worker/Cargo.toml"
 module-name = "pilotwave"
 
