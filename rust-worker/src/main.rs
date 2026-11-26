@@ -3,7 +3,9 @@
 //! Thin bootstrap: parse the CLI, load config, dispatch without a DB (`log`,
 //! `stop`, the `--bg` parent) and delegate to `worker::Worker` for oneshots
 //! (`status`/`inspect`/`list`/single `run`) and loops (`--fg`/`--bg-child`).
-//! `status` shows the daemon section even when the DB is down.
+//! `status` shows the daemon section even when the DB is down; `is-alive`
+//! prints its one-line probe (`fresh|stale|down|error`, exits 0/1/2) even
+//! with bad config or a dead DB, so a cron keep-alive stays machine-readable.
 
 mod attachments;
 mod cli;
@@ -39,9 +41,27 @@ async fn run() -> worker::Result<ExitCode> {
     logging::set_verbose(cli.verbose);
 
     // Parse `.env` without exporting it (see `config::Env`), then build the
-    // typed config. Real env vars win over the file.
-    let env = config::Env::load()?;
-    let config = config::Config::from_env(&env)?;
+    // typed config. Real env vars win over the file. `is-alive` is a cron
+    // probe: even bad config reports as its one-line `error` (exit 2)
+    // instead of the generic `fatal` (exit 1), so the line stays
+    // machine-readable; the detail goes to stderr.
+    let is_alive = matches!(cli.command, cli::Command::IsAlive(_));
+    let bad_config = |msg: String| -> worker::Result<ExitCode> {
+        if is_alive {
+            eprintln!("error: {msg}");
+            println!("{}", cli::render_is_alive_error("bad_config"));
+            return Ok(ExitCode::from(2));
+        }
+        Err(msg.into())
+    };
+    let env = match config::Env::load() {
+        Ok(env) => env,
+        Err(msg) => return bad_config(msg),
+    };
+    let config = match config::Config::from_env(&env) {
+        Ok(config) => config,
+        Err(msg) => return bad_config(msg),
+    };
     // `log` never touches the DB and its stdout carries ONLY log content: it
     // is served before any banner (`starting ...` goes to stdout).
     if let cli::Command::Log(args) = &cli.command {
@@ -49,16 +69,22 @@ async fn run() -> worker::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     // `Debug` redacts `database_url` and `smtp_password`: safe for logs.
-    logging::debug(&format!("config: {config:?}"));
+    // (`is-alive` stays silent on stdout: its only stdout line is the probe
+    // result, so even `-v` diagnostics must not pollute command substitution.
+    // The suppression lives here, not in `logging`, to keep every other
+    // subcommand byte-identical.)
+    if !is_alive {
+        logging::debug(&format!("config: {config:?}"));
 
-    // Never log `database_url`: it carries the DB password.
-    logging::info(&format!(
-        "starting worker_id={} queue={} backend={} tasks={}",
-        config.worker_id,
-        config.queue_name,
-        config.backend_name,
-        config.task_paths.join(",")
-    ));
+        // Never log `database_url`: it carries the DB password.
+        logging::info(&format!(
+            "starting worker_id={} queue={} backend={} tasks={}",
+            config.worker_id,
+            config.queue_name,
+            config.backend_name,
+            config.task_paths.join(",")
+        ));
+    }
 
     // `--bg` parent: idempotent probe + spawn, without touching the DB.
     // Presentation (stdout/stderr/logging) lives here; `daemon` only
@@ -130,9 +156,11 @@ async fn run() -> worker::Result<ExitCode> {
     // One-shot: single attempt, fail loud (`?` -> exit 1).
     // `status` resolves the daemon BEFORE touching the DB: the daemon section
     // prints even when Postgres is down (DB down => daemon on stdout +
-    // detail on stderr + exit 1). Without `PILOTWAVE_PID_FILE` there is no
+    // detail on stderr + exit 1). `is-alive` resolves it the same way so
+    // `down`/`error` still print when Postgres is down (read-only probe:
+    // never writes, never signals). Without `PILOTWAVE_PID_FILE` there is no
     // crash: the section reports "not configured".
-    let daemon_info = if matches!(cli.command, cli::Command::Status) {
+    let daemon_info = if matches!(cli.command, cli::Command::Status | cli::Command::IsAlive(_)) {
         Some(daemon::describe(&config))
     } else {
         None
@@ -140,7 +168,10 @@ async fn run() -> worker::Result<ExitCode> {
     // Read-only subcommands use the reader DSN when configured (roadmap R-7).
     let read_only = matches!(
         &cli.command,
-        cli::Command::Status | cli::Command::Inspect(_) | cli::Command::List(_)
+        cli::Command::Status
+            | cli::Command::IsAlive(_)
+            | cli::Command::Inspect(_)
+            | cli::Command::List(_)
     );
     let dsn = if read_only {
         config.read_database_url()
@@ -150,6 +181,14 @@ async fn run() -> worker::Result<ExitCode> {
     let pool = match db::connect(dsn).await {
         Ok(pool) => pool,
         Err(err) => {
+            if matches!(cli.command, cli::Command::IsAlive(_)) {
+                // Cron probe: DB unreachable is `error` (exit 2: alert,
+                // never blind-restart against a dead Postgres). The daemon
+                // was already resolved above without touching the DB.
+                eprintln!("error: base de datos no disponible: {err}");
+                println!("{}", cli::render_is_alive_error("db_unavailable"));
+                return Ok(ExitCode::from(2));
+            }
             if let Some(info) = &daemon_info {
                 // Only `status` reaches here with the daemon resolved.
                 println!("{}", cli::render_daemon_status(info));
@@ -161,7 +200,10 @@ async fn run() -> worker::Result<ExitCode> {
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
     };
-    logging::info("postgres connected (max_connections=1)");
+    // `is-alive` stays silent on stdout (single probe line only).
+    if !is_alive {
+        logging::info("postgres connected (max_connections=1)");
+    }
     // Least-privilege check (roadmap R-6): fail loud when the role lacks the
     // minimum `.env.example` GRANTs. Write paths only (`run`): `status` /
     // `inspect` / `list` use the reader DSN and never write.
@@ -177,6 +219,11 @@ async fn run() -> worker::Result<ExitCode> {
     match cli.command {
         cli::Command::Status => {
             worker.run_status(daemon_info.as_ref()).await?;
+        }
+        cli::Command::IsAlive(args) => {
+            // Explicit codes, never `?` (`main` maps `Err` to 1):
+            // fresh => 0, stale/down => 1, error => 2.
+            return worker.run_is_alive(args.max_age_secs).await;
         }
         cli::Command::Inspect(args) => {
             worker.run_inspect(&args.id, args.show_pii).await?;

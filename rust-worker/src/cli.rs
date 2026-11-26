@@ -6,6 +6,9 @@
 //! Behavior:
 //! - Without a subcommand: show help (`arg_required_else_help`).
 //! - `status`: print the counts table (see [`render_status_table`]).
+//! - `is-alive`: one machine-readable liveness line on stdout
+//!   (`fresh|stale|down|error`), exits 0/1/2; read-only, never signals or
+//!   starts anything (cron keep-alive, see ADR-004).
 //! - `run`: execute available tasks (logic in `main.rs` + `db/`).
 //! - `stop`: stop the `--bg` daemon (SIGTERM + wait + SIGKILL,
 //!   idempotent; never touches the DB).
@@ -42,6 +45,16 @@ pub struct Cli {
 pub enum Command {
     /// Show the count of available, in-flight and completed tasks.
     Status,
+    /// Machine-readable liveness probe for cron keep-alive (see ADR-004).
+    ///
+    /// Prints exactly one line on stdout (`fresh age_secs=.. pid=..`,
+    /// `stale age_secs=.. pid=..`, `down reason=..`, `error reason=..`).
+    /// Exit 0 = fresh (nothing to do); 1 = stale/down (restartable: the
+    /// caller runs `run --bg`); 2 = error (bad config / DB unreachable:
+    /// alert, never blind-restart). Read-only: uses the reader DSN when
+    /// configured, never writes, never signals or starts anything.
+    /// Diagnostics stay on stderr so command substitution never breaks.
+    IsAlive(IsAliveArgs),
     /// Claim and finalize: one task (`--id`), one generic task, or loop (`--fg`).
     Run(RunArgs),
     /// List tasks by state with pagination.
@@ -58,6 +71,60 @@ pub enum Command {
     /// (different inode) or truncation warn on stderr and reopen from 0.
     /// Never touches the DB.
     Log(LogArgs),
+}
+
+/// Arguments for `is-alive`: the restart policy lives with the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Args)]
+pub struct IsAliveArgs {
+    /// Max heartbeat age in seconds before `stale`. The integrator owns
+    /// the restart threshold (aiph-crm uses 360 for its 5-min cron); the
+    /// default preserves the `fresh`/`stale` meaning from `heartbeat.rs`.
+    #[arg(long, default_value_t = 90, value_name = "N")]
+    pub max_age_secs: u64,
+}
+
+/// Validate `--max-age-secs`: a 0 s threshold would report `stale` forever.
+/// Message ready for the `error reason=..` line (single token, no spaces).
+pub fn validate_max_age_secs(n: u64) -> Result<u64, String> {
+    if n >= 1 {
+        Ok(n)
+    } else {
+        Err("invalid_max_age_secs".to_owned())
+    }
+}
+
+/// Render the `is-alive` fresh line (exactly one line, no trailing newline;
+/// `println!` adds it). `pid` comes from the heartbeat metadata (`n/a`
+/// when the row carries none).
+pub fn render_is_alive_fresh(age_secs: i64, pid: &str) -> String {
+    format!("fresh age_secs={age_secs} pid={pid}")
+}
+
+/// Render the `is-alive` stale line (same shape as fresh; exit 1).
+pub fn render_is_alive_stale(age_secs: i64, pid: &str) -> String {
+    format!("stale age_secs={age_secs} pid={pid}")
+}
+
+/// Render the `is-alive` down line (restartable, exit 1).
+/// `reason` is a single `snake_case` token (`no_heartbeat`).
+pub fn render_is_alive_down(reason: &str) -> String {
+    format!("down reason={reason}")
+}
+
+/// Render the `is-alive` error line (alert, exit 2, never blind-restart).
+/// `reason` is a single `snake_case` token (`db_unavailable`,
+/// `heartbeat_read_failed`, `bad_config`, `invalid_max_age_secs`).
+pub fn render_is_alive_error(reason: &str) -> String {
+    format!("error reason={reason}")
+}
+
+/// Best-effort `pid` for the `is-alive` line from the heartbeat metadata
+/// (`n/a` when missing or garbage; never fails, like `status`).
+pub fn is_alive_pid(metadata: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|v| v.get("pid").and_then(|n| n.as_u64()).map(|n| n.to_string()))
+        .unwrap_or_else(|| "n/a".to_owned())
 }
 
 /// Arguments for `run`: one specific task, one generic task, loop, or daemon.
@@ -1088,5 +1155,82 @@ mod tests {
         assert!(out.contains("uptime=n/a"));
         assert!(out.contains("rss=n/a"));
         assert!(out.contains("last_task=-"));
+    }
+
+    #[test]
+    fn is_alive_parsea_default_90_y_max_age_custom() {
+        let cli = Cli::try_parse_from(["pilotwave-worker", "is-alive"]).unwrap();
+        let Command::IsAlive(args) = cli.command else {
+            panic!("se esperaba Command::IsAlive");
+        };
+        assert_eq!(args.max_age_secs, 90);
+        let cli =
+            Cli::try_parse_from(["pilotwave-worker", "is-alive", "--max-age-secs", "360"]).unwrap();
+        let Command::IsAlive(args) = cli.command else {
+            panic!("se esperaba Command::IsAlive");
+        };
+        assert_eq!(args.max_age_secs, 360);
+        // Sin subcomando sigue fallando con ayuda (is-alive no es default).
+        let err =
+            Cli::try_parse_from(["pilotwave-worker"]).expect_err("debe fallar sin subcomando");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn is_alive_validate_rechaza_cero() {
+        assert_eq!(validate_max_age_secs(1), Ok(1));
+        assert_eq!(validate_max_age_secs(90), Ok(90));
+        assert_eq!(validate_max_age_secs(360), Ok(360));
+        let err = validate_max_age_secs(0).expect_err("0 debe fallar");
+        assert!(!err.contains(' '), "reason de un solo token, got: {err}");
+    }
+
+    #[test]
+    fn is_alive_render_una_sola_linea_maquina_legible() {
+        let fresh = render_is_alive_fresh(3, "1234");
+        assert_eq!(fresh, "fresh age_secs=3 pid=1234");
+        let stale = render_is_alive_stale(3600, "1234");
+        assert_eq!(stale, "stale age_secs=3600 pid=1234");
+        let down = render_is_alive_down("no_heartbeat");
+        assert_eq!(down, "down reason=no_heartbeat");
+        let error = render_is_alive_error("db_unavailable");
+        assert_eq!(error, "error reason=db_unavailable");
+        for line in [&fresh, &stale] {
+            assert!(!line.contains('\n'), "una sola línea, got: {line:?}");
+            assert_eq!(
+                line.split_whitespace().count(),
+                3,
+                "tres campos, got: {line:?}"
+            );
+        }
+        for line in [&down, &error] {
+            assert!(!line.contains('\n'), "una sola línea, got: {line:?}");
+            assert_eq!(
+                line.split_whitespace().count(),
+                2,
+                "dos campos, got: {line:?}"
+            );
+        }
+        // Primera palabra: fresh|stale|down|error.
+        for (line, first) in [
+            (render_is_alive_fresh(0, "n/a"), "fresh"),
+            (render_is_alive_stale(91, "n/a"), "stale"),
+            (render_is_alive_down("no_heartbeat"), "down"),
+            (render_is_alive_error("bad_config"), "error"),
+        ] {
+            assert_eq!(line.split_whitespace().next().unwrap(), first);
+        }
+    }
+
+    #[test]
+    fn is_alive_pid_best_effort_nunca_falla() {
+        let meta = serde_json::json!({"pid": 1234}).to_string();
+        assert_eq!(is_alive_pid(&meta), "1234");
+        assert_eq!(is_alive_pid("no-es-json{"), "n/a");
+        assert_eq!(is_alive_pid("{}"), "n/a");
+        assert_eq!(is_alive_pid(r#"{"pid": null}"#), "n/a");
     }
 }

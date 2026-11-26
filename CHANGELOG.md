@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## Unreleased
+
+### Features
+
+- `is-alive` liveness subcommand for cron keep-alive (ADR-004): one
+  machine-readable stdout line (`fresh|stale|down|error`), exits 0/1/2,
+  `--max-age-secs` (default 90), read-only via the reader DSN; docs in
+  `docs/05-DEVELOPERS/getting-started.md` and `README.md`.
+
 ## v0.3.0 (2026-11-26)
 
 ### Features

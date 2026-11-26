@@ -132,6 +132,7 @@ See `example/demo/` for a runnable app.
 pilotwave-worker run --fg   # foreground loop (systemd/Docker)
 pilotwave-worker run        # oneshot: claim one READY task, then exit
 pilotwave-worker status     # queue counts + daemon + heartbeat
+pilotwave-worker is-alive   # cron probe: one line (fresh|stale|down|error), exits 0/1/2
 ```
 
 Minimal `.env`:
@@ -173,7 +174,7 @@ anyone who can reach the SMTP host can send mail as you (egress note in
 | Key | Purpose | Default |
 | --- | --- | --- |
 | `PILOTWAVE_DATABASE_URL` | Worker DSN (least-privilege role, never `DATABASE_URL`) | required |
-| `PILOTWAVE_DATABASE_URL_RO` | Read-only DSN for `status/list/inspect` | falls back to worker DSN |
+| `PILOTWAVE_DATABASE_URL_RO` | Read-only DSN for `status/list/inspect/is-alive` | falls back to worker DSN |
 | `PILOTWAVE_TASK_PATHS` | Task allowlist (defaults to shipped task) | `pilotwave.tasks.mail_notification` |
 | `PILOTWAVE_QUEUE_NAME` / `PILOTWAVE_BACKEND_NAME` | Claim scope | `pilotwave.email` / `default` |
 | `PILOTWAVE_POLL_MIN_MS` / `MAX_MS` | Backoff when queue empty | `1500` / `5000` |
@@ -198,6 +199,10 @@ Outside `localhost`, non-TLS DSNs and plaintext SMTP fail loud — set `?sslmode
 - Run `pilotwave-worker run --fg` under systemd/Docker with `Restart=always`. `--bg` daemon mode exists but foreground + supervisor is preferred.
 - Scale horizontally with more workers — `SKIP LOCKED` prevents double-claim. Expect duplicates only on crash-after-send (at-least-once).
 - Monitor `pilotwave_heartbeat` (`key='pilotwave_worker'`): alert if `last_seen` is stale or `metadata.last_error_code` is `smtp_transient`/`smtp_exhausted`.
+- Cron keep-alive without systemd (see ADR [004](docs/02-DECISIONS/004-is-alive-subcommand.md)): `is-alive` prints one line (`fresh age_secs=.. pid=..`, `stale …`, `down reason=..`, `error reason=..`) with exits 0/1/2. Restart on exit 1, alert on exit 2 (never blind-restart against a dead Postgres); the threshold lives with the caller:
+  ```bash
+  flock -n /run/pilotwave.keepalive pilotwave-worker is-alive --max-age-secs 360 || pilotwave-worker run --bg
+  ```
 - Attachments: declare `attachment_paths` + `attachment_sizes` (max 10 files, 6 MiB each, 10 MiB total); paths must canonicalize under `PILOTWAVE_ATTACHMENT_ROOTS`, no symlinks, no `/proc|sys|dev|etc`.
 - Backpressure: the worker is the authority — there is no producer-side flood guard. Monitor queue depth and shed load (429) in your view before enqueuing.
 

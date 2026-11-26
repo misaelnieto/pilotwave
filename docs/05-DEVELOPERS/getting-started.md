@@ -23,6 +23,7 @@ just dev-up              # start local Postgres
 just migrate             # apply Pilotwave migrations
 just run-worker          # claim + send one READY task (oneshot)
 just worker-status       # queue counts + daemon + heartbeat
+just is-alive            # liveness probe: one line, exits 0/1/2 (cron keep-alive)
 just test                # Python + Rust tests
 just lint                # ruff + cargo fmt/clippy (readonly)
 just format              # autofix/format both languages
@@ -57,11 +58,43 @@ just inspect <UUID>              # every column of one queue row
 just log -- -n 50 -f             # last 50 lines, then follow appends
 ```
 
-`status`, `run`, `list` and `inspect` need `PILOTWAVE_DATABASE_URL` plus a
+`status`, `run`, `list`, `inspect` and `is-alive` need `PILOTWAVE_DATABASE_URL` plus a
 live Postgres; `log` and `stop` never touch the database (`stop` only
 signals the daemon via `PILOTWAVE_PID_FILE`). Run any binary with `--help`
 (`just` passes it through the same way, e.g. `just log -- --help`) for the
 full flag reference.
+
+## Cron keep-alive (`is-alive`, ADR-004)
+
+`just worker-status` prints a human table; a cron probe needs a
+machine-readable signal. `is-alive` prints **exactly one line** on stdout
+(diagnostics stay on stderr, so command substitution never breaks):
+
+```bash
+just is-alive
+# fresh age_secs=3 pid=1234     -> exit 0 (nothing to do)
+# stale age_secs=400 pid=1234   -> exit 1 (restartable)
+# down reason=no_heartbeat      -> exit 1 (restartable)
+# error reason=db_unavailable   -> exit 2 (alert, never blind-restart)
+```
+
+Exit 1 means stale/down: the caller restarts (`is-alive ... || run --bg`;
+`run --bg` is idempotent, already-running is a no-op exit 0). Exit 2 means
+bad config or an unreachable DB: page, don't respawn against a dead
+Postgres. The probe is strictly read-only (reader DSN when configured,
+single heartbeat `SELECT`; never writes, never signals or starts anything).
+
+The restart threshold lives with the caller via `--max-age-secs` (default
+90, the `fresh`/`stale` meaning from `heartbeat.rs`). A 5-minute cron with
+one full interval plus margin uses 360:
+
+```bash
+flock -n /run/pilotwave.keepalive pilotwave-worker is-alive --max-age-secs 360 || pilotwave-worker run --bg
+```
+
+Even with a dead DB or bad config the probe still prints its one line
+(`error reason=..`, exit 2); only a missing subcommand/flag usage error
+goes to stderr (clap, exit 2).
 
 ## Configuration
 

@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use std::process::ExitCode;
+
 use crate::attachments;
 use crate::cli::{self, DaemonInfo};
 use crate::config::Config;
@@ -168,6 +170,41 @@ impl Worker {
             None => println!("heartbeat: never_run (el sidecar aún no escribió)"),
         }
         Ok(())
+    }
+
+    /// `is-alive`: one machine-readable liveness line on stdout (ADR-004).
+    ///
+    /// Read-only: a single heartbeat `SELECT` through the reader DSN (the
+    /// caller picks the pool). Never writes, never signals, never starts
+    /// anything. Always returns `Ok` with the explicit code: 0 fresh,
+    /// 1 stale/down (restartable), 2 error (alert, never blind-restart) --
+    /// `main()` maps `Err` to 1, so no `?` may escape from here.
+    pub async fn run_is_alive(&self, max_age_secs: u64) -> Result<ExitCode> {
+        let Ok(max_age) = cli::validate_max_age_secs(max_age_secs) else {
+            println!("{}", cli::render_is_alive_error("invalid_max_age_secs"));
+            return Ok(ExitCode::from(2));
+        };
+        let heartbeat = match self.store.read_heartbeat().await {
+            Ok(heartbeat) => heartbeat,
+            Err(err) => {
+                // stderr, never stdout: the probe line stays machine-readable.
+                eprintln!("WARNING pilotwave-worker: is-alive: heartbeat no legible: {err}");
+                println!("{}", cli::render_is_alive_error("heartbeat_read_failed"));
+                return Ok(ExitCode::from(2));
+            }
+        };
+        let Some(hb) = heartbeat else {
+            println!("{}", cli::render_is_alive_down("no_heartbeat"));
+            return Ok(ExitCode::from(1));
+        };
+        let pid = cli::is_alive_pid(&hb.metadata);
+        if hb.age_secs <= max_age as i64 {
+            println!("{}", cli::render_is_alive_fresh(hb.age_secs, &pid));
+            Ok(ExitCode::SUCCESS)
+        } else {
+            println!("{}", cli::render_is_alive_stale(hb.age_secs, &pid));
+            Ok(ExitCode::from(1))
+        }
     }
 
     /// `inspect <UUID>`: every field of one row by id (unfiltered).

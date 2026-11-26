@@ -86,6 +86,14 @@ run-worker *args:
 worker-status:
     cargo run --manifest-path rust-worker/Cargo.toml -- status
 
+# Liveness probe for cron keep-alive (ADR-004): exactly one stdout line
+# (`fresh|stale|down|error`), exits 0/1/2. Restart when stale/down:
+#   just is-alive -- --max-age-secs 360 || just run-worker -- --bg
+# Read-only (reader DSN when configured); never kills or starts anything.
+[group("Development")]
+is-alive *args:
+    cargo run --manifest-path rust-worker/Cargo.toml -- is-alive {{ args }}
+
 # Stop the `--bg` daemon (SIGTERM, then SIGKILL; idempotent; touches no DB).
 [group("Development")]
 stop:
