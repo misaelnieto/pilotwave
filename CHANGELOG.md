@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-11-26)
+
+### Features
+
+- Optional anonymous SMTP for Mailcrab dev via PILOTWAVE_ALLOW_ANONYMOUS_SMTP
+  ([`49e76d1`](https://github.com/misaelnieto/pilotwave/commit/49e76d14743280201e870aa4e2994bfd10bd22d9))
+
+
 ## v0.2.3 (2026-11-26)
 
 ### Bug Fixes
