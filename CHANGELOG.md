@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.3 (2026-11-26)
+
+### Bug Fixes
+
+- Include python module in wheel + dynamic __version__
+  ([`fd62498`](https://github.com/misaelnieto/pilotwave/commit/fd6249848488e536d6a570ce0453383bd67367af))
+
+
 ## v0.2.2 (2026-11-25)
 
 ### Bug Fixes
