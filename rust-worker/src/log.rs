@@ -21,7 +21,7 @@ use crate::config::Config;
 pub const FOLLOW_POLL: Duration = Duration::from_millis(500);
 /// Stderr warning on rotation or truncation (the log rotates rarely, but it
 /// must be detected instead of hanging on a dead offset).
-pub const ROTATION_NOTICE: &str = "rotación detectada: reabriendo desde el inicio";
+pub const ROTATION_NOTICE: &str = "rotation detected: reopening from the start";
 /// Reverse-read block size for the tail (avoids loading the whole file).
 const TAIL_BLOCK: u64 = 8 * 1024;
 /// Cap per poll in `-f`: when a poll brings more, advance in chunks instead
@@ -33,7 +33,7 @@ const FOLLOW_MAX_READ: u64 = 16 * 1024 * 1024;
 /// cause, exit 1).
 pub fn resolve_log_file(config: &Config) -> Result<PathBuf, String> {
     let path = config.log_file.clone().ok_or_else(|| {
-        "PILOTWAVE_LOG_FILE no configurado: `log` necesita la ruta absoluta del log del daemon"
+        "PILOTWAVE_LOG_FILE not configured: `log` needs the absolute path of the daemon log"
             .to_owned()
     })?;
     std::fs::metadata(&path).map_err(|err| open_failed(&path, "log file", &err))?;
@@ -44,10 +44,10 @@ pub fn resolve_log_file(config: &Config) -> Result<PathBuf, String> {
 fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind as Kind;
     let hint = match err.kind() {
-        Kind::NotFound => "no existe (¿el daemon --bg llegó a arrancar?)",
-        Kind::PermissionDenied => "sin permiso: revisa dueño y modo del archivo y sus directorios",
-        Kind::IsADirectory => "es un directorio, no un archivo",
-        _ => "fallo de E/S",
+        Kind::NotFound => "missing (did the --bg daemon ever start?)",
+        Kind::PermissionDenied => "permission denied: check file and directory owner and mode",
+        Kind::IsADirectory => "is a directory, not a file",
+        _ => "I/O failure",
     };
     format!("{what} {}: {hint}: {err}", path.display())
 }
@@ -203,7 +203,7 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
         Ok(st) => st,
         // Unlikely race (just read): warn and restart from 0.
         Err(msg) => {
-            eprintln!("aviso: {msg}");
+            eprintln!("warning: {msg}");
             (0, None)
         }
     };
@@ -215,7 +215,7 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
         let (len, cur_ino) = match stat(&path) {
             Ok(st) => st,
             Err(msg) => {
-                eprintln!("aviso: {msg}");
+                eprintln!("warning: {msg}");
                 continue;
             }
         };
@@ -229,13 +229,13 @@ pub async fn run_log(config: &Config, args: &LogArgs) -> Result<(), Box<dyn std:
                 Ok(data) => {
                     offset += data.len() as u64;
                     if let Err(err) = write_stdout(&data) {
-                        eprintln!("aviso: stdout: {err}");
+                        eprintln!("warning: stdout: {err}");
                         break;
                     }
                     // Partial chunk (per-poll cap): the next poll brings
                     // the rest without reopening.
                 }
-                Err(msg) => eprintln!("aviso: {msg}"),
+                Err(msg) => eprintln!("warning: {msg}"),
             }
         }
     }

@@ -70,6 +70,20 @@ means the Rust worker holds less resident memory doing the same work.
 Pss additionally discounts shared pages, so it is the fairer number when
 both workers run side by side with the same libc/Postgres client libs.
 
+## Results (one run — re-run before quoting)
+
+| worker | RSS max | RSS idle mean | PSS max |
+| --- | --- | --- | --- |
+| minimal Python poller (stdlib + psycopg, no Django) | 49,428 kB | 49,428 kB | 41,007 kB |
+| `pilotwave-worker` release | 5,028 kB | 5,028 kB | 3,012 kB |
+| **ratio** | **9.8x less** | **9.8x less** | **13.6x less** |
+
+Raw numbers: [`results/summary.txt`](results/summary.txt). In this run
+idle RSS equals max on both sides. The benchmark reproduces only against
+the fake SMTP on `:1026` (with AUTH), never against Mailcrab `:1025`,
+and it needs Docker plus a release build (`cargo run` debug is never
+measured).
+
 ## Honest caveats
 
 - Postgres-as-queue + at-least-once: the benchmark inherits the

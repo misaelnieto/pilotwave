@@ -25,9 +25,15 @@ use crate::config::Config;
 /// `paths()`); with a pidfile, probe the lock + identity and resolve
 /// uptime/rss best-effort (`None` = unreadable `/proc` => `n/a`).
 pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
-    match config.pid_file.as_ref() {
+    describe_pid_file(config.pid_file.as_ref())
+}
+
+/// Same as [`describe`] but for callers without a full [`Config`]
+/// (`is-alive` runs on the reader DSN only and never builds one).
+pub fn describe_pid_file(pid_file: Option<&PathBuf>) -> crate::cli::DaemonInfo {
+    match pid_file {
         None => crate::cli::DaemonInfo::NotConfigured,
-        // Note: `config.pid_file` directly, NOT `paths()`
+        // Note: `pid_file` directly, NOT `paths()`
         // (that one also requires the log; here only the pidfile matters).
         Some(pid_path) => match check(pid_path) {
             LockState::Free => crate::cli::DaemonInfo::NotRunning,
@@ -51,7 +57,7 @@ pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
 ///   SIGKILL phase waits 5 s more (see `STOP_*`).
 pub fn run_stop(config: &Config) -> Result<StopOutcome, Box<dyn std::error::Error>> {
     let Some(pid_path) = config.pid_file.as_ref() else {
-        let msg = "PILOTWAVE_PID_FILE no configurado: sin pidfile no hay daemon que detener";
+        let msg = "PILOTWAVE_PID_FILE not configured: without a pidfile there is no daemon to stop";
         return Err(
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))
                 as Box<dyn std::error::Error>,
@@ -81,30 +87,84 @@ pub enum BgOutcome {
 /// `--bg` parent: idempotent probe + detached spawn, without touching the DB.
 /// Already alive => no-op exit 0. Owned dirs are created (0700); any failure
 /// carries path and cause.
+///
+/// Concurrency: concurrent starters serialize on a `<pid>.lock` startup
+/// lock held across the probe, spawn and wait for the child to publish.
+/// The parent never writes the PID file itself (only the child writes it
+/// while holding the PID lock via [`acquire`]): an earlier parent write
+/// used to truncate the file after the winning child had published, so
+/// later probes and `stop` no longer identified the running daemon.
 pub fn run_bg_parent(
     config: &Config,
     verbose: bool,
 ) -> Result<BgOutcome, Box<dyn std::error::Error>> {
     let (pid_path, log_path) =
         paths(config).map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+    // Preflight BEFORE spawning: owned dirs, writable pidfile, 0600.
+    // Without this the child started orphaned and the parent died with
+    // `os error 2`. This also creates the pidfile (empty) when missing,
+    // so the absence of a child write below still leaves a `Free` file
+    // behind instead of a missing path.
+    ensure_parent_dir(&pid_path).map_err(|err| std::io::Error::other(err.to_string()))?;
+    ensure_parent_dir(&log_path).map_err(|err| std::io::Error::other(err.to_string()))?;
+    ensure_pid_file_writable(&pid_path).map_err(std::io::Error::other)?;
+    // Serialize concurrent starters: two overlapping cron ticks must not
+    // both probe `Free` and spawn. The lock is never stale (`flock`
+    // releases on death) and is held until the child publishes.
+    let lock_path = startup_lock_path(&pid_path);
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|err| std::io::Error::other(open_failed(&lock_path, "startup lock file", &err)))?;
+    match try_flock(&lock_file) {
+        Err(raw) if raw == libc::EWOULDBLOCK || raw == libc::EAGAIN => {
+            // Another `run --bg` is spawning right now: wait for its daemon
+            // instead of spawning a duplicate. A timeout means the other
+            // starter died without publishing; the next cron tick retries.
+            if let Some(pid) = wait_for_running(&pid_path, STARTUP_WAIT) {
+                return Ok(BgOutcome::AlreadyRunning(pid));
+            }
+            return Err(Box::new(std::io::Error::other(format!(
+                "another run --bg startup in progress (startup lock {}): \
+                 no daemon appeared; retry on the next tick",
+                lock_path.display()
+            ))) as Box<dyn std::error::Error>);
+        }
+        Err(raw) => {
+            return Err(Box::new(std::io::Error::other(format!(
+                "flock {}: {raw}",
+                lock_path.display()
+            ))) as Box<dyn std::error::Error>);
+        }
+        Ok(()) => {}
+    }
+    // Held until return: probe + spawn + wait are atomic w.r.t. other
+    // `run --bg` parents.
+    let _startup_guard = lock_file;
     // Idempotent probe first: when already alive, touch nothing (cron-friendly).
     if let LockState::Running(pid) = check(&pid_path) {
         return Ok(BgOutcome::AlreadyRunning(pid));
     }
-    // Preflight BEFORE spawning: owned dirs, writable pidfile, 0600.
-    // Without this the child started orphaned and the parent died with
-    // `os error 2`.
-    ensure_parent_dir(&pid_path).map_err(|err| std::io::Error::other(err.to_string()))?;
-    ensure_parent_dir(&log_path).map_err(|err| std::io::Error::other(err.to_string()))?;
-    ensure_pid_file_writable(&pid_path).map_err(std::io::Error::other)?;
-    let pid = spawn_detached(&log_path, verbose)?;
-    // The child rewrites its PID when taking the lock; this leaves the file
-    // ready right away (stale text + unlocked = Free when the child never
-    // starts).
-    std::fs::write(&pid_path, format!("{pid}\n")).map_err(|err| {
-        std::io::Error::other(format!("write pid file {}: {err}", pid_path.display()))
-    })?;
-    Ok(BgOutcome::Started(pid))
+    let spawned = spawn_detached(&log_path, verbose)?;
+    // The child publishes its own PID when it takes the PID lock (see
+    // `acquire`); the parent must not touch the file afterwards. Wait
+    // briefly so a concurrent starter serialized behind us observes
+    // `Running` instead of spawning a duplicate. On timeout preserve the
+    // old fire-and-forget semantics: report the spawn and let the next
+    // probe retry (the file stays `Free`: stale text + unlocked).
+    if let Some(pid) = wait_for_running(&pid_path, STARTUP_WAIT) {
+        if pid == spawned {
+            return Ok(BgOutcome::Started(pid));
+        }
+        // Another daemon won the PID lock (e.g. a manual `--bg-child`):
+        // idempotent, report the owner instead of the dead duplicate.
+        return Ok(BgOutcome::AlreadyRunning(pid));
+    }
+    Ok(BgOutcome::Started(spawned))
 }
 
 /// Wait after SIGTERM before escalating to SIGKILL (graceful-shutdown
@@ -115,6 +175,39 @@ pub const STOP_TERM_TIMEOUT: Duration = Duration::from_secs(35);
 pub const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll interval while waiting for the daemon to die.
 pub const STOP_POLL: Duration = Duration::from_millis(500);
+/// How long a `run --bg` parent waits for the freshly spawned child to
+/// take the PID lock before reporting the spawn fire-and-forget. Long
+/// enough for fork+exec on a loaded host, short enough to stay
+/// cron-friendly (the 5-minute tick retries anyway).
+pub const STARTUP_WAIT: Duration = Duration::from_secs(10);
+/// Poll interval while waiting for the child to publish its PID.
+pub const STARTUP_POLL: Duration = Duration::from_millis(50);
+
+/// Startup serialization lock: `<pidfile>.lock` next to the PID file.
+/// Held by a `run --bg` parent across its probe, spawn and wait so two
+/// overlapping starters cannot both observe `Free` and spawn. Never stale:
+/// `flock` releases it when the holder dies.
+pub fn startup_lock_path(pid_path: &Path) -> PathBuf {
+    let mut raw = pid_path.as_os_str().to_owned();
+    raw.push(".lock");
+    PathBuf::from(raw)
+}
+
+/// Poll [`check`] until the daemon shows `Running` or `timeout` elapses.
+/// `Some(pid)` when the child published in time; `None` on timeout.
+/// With a zero `timeout` probe once, without sleeping (handy in tests).
+pub fn wait_for_running(path: &Path, timeout: Duration) -> Option<u32> {
+    let start = Instant::now();
+    loop {
+        if let LockState::Running(pid) = check(path) {
+            return Some(pid);
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        std::thread::sleep(STARTUP_POLL.min(timeout.saturating_sub(start.elapsed())));
+    }
+}
 
 /// Daemon paths. Both must be configured (absolute) for `--bg` /
 /// `--bg-child`; every other subcommand ignores them.
@@ -266,11 +359,11 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), AcquireError> {
 fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind as Kind;
     let hint = match err.kind() {
-        Kind::NotFound => "ruta inexistente o symlink roto",
-        Kind::PermissionDenied => "sin permiso: revisa dueño y modo del archivo y sus directorios",
-        Kind::IsADirectory => "es un directorio, no un archivo",
-        Kind::AlreadyExists => "ya existe con otro tipo",
-        _ => "fallo de E/S",
+        Kind::NotFound => "missing path or broken symlink",
+        Kind::PermissionDenied => "permission denied: check file and directory owner and mode",
+        Kind::IsADirectory => "is a directory, not a file",
+        Kind::AlreadyExists => "already exists with another type",
+        _ => "I/O failure",
     };
     format!("{what} {}: {hint}: {err}", path.display())
 }
@@ -293,7 +386,7 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
         .map_err(|err| open_failed(path, "pid file (metadata)", &err))?;
     if !meta.file_type().is_file() {
         return Err(format!(
-            "pid file {}: no es un archivo regular",
+            "pid file {}: is not a regular file",
             path.display()
         ));
     }
@@ -302,7 +395,7 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
     if meta.permissions().mode() & 0o7777 & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
             format!(
-                "pid file {}: no se pudo endurecer a 0600: {err}",
+                "pid file {}: could not harden to 0600: {err}",
                 path.display()
             )
         })?;
@@ -407,13 +500,13 @@ pub fn stop_daemon(
         }
         Err(errno) if errno == libc::EPERM => {
             return Err(format!(
-                "no se pudo detener pid={pid} (pid file {}): sin permiso (EPERM): revisa que el daemon corra con tu usuario",
+                "could not stop pid={pid} (pid file {}): permission denied (EPERM): check that the daemon runs as your user",
                 path.display()
             ));
         }
         Err(errno) => {
             return Err(format!(
-                "no se pudo enviar SIGTERM a pid={pid} (pid file {}): kill devolvió errno {errno}",
+                "could not send SIGTERM to pid={pid} (pid file {}): kill returned errno {errno}",
                 path.display()
             ));
         }
@@ -432,13 +525,13 @@ pub fn stop_daemon(
         }
         Err(errno) if errno == libc::EPERM => {
             return Err(format!(
-                "no se pudo forzar pid={pid} (pid file {}): sin permiso (EPERM): revisa que el daemon corra con tu usuario",
+                "could not force pid={pid} (pid file {}): permission denied (EPERM): check that the daemon runs as your user",
                 path.display()
             ));
         }
         Err(errno) => {
             return Err(format!(
-                "no se pudo enviar SIGKILL a pid={pid} (pid file {}): kill devolvió errno {errno}",
+                "could not send SIGKILL to pid={pid} (pid file {}): kill returned errno {errno}",
                 path.display()
             ));
         }
@@ -447,7 +540,7 @@ pub fn stop_daemon(
         return Ok(StopOutcome::Stopped { pid, forced: true });
     }
     Err(format!(
-        "daemon pid={pid} sigue vivo tras SIGTERM+SIGKILL (pid file {}): no responde; revísalo manualmente",
+        "daemon pid={pid} still alive after SIGTERM+SIGKILL (pid file {}): not responding; check it manually",
         path.display()
     ))
 }
@@ -695,5 +788,39 @@ mod tests {
         }
         assert_eq!(read_pid(&path), Some(std::process::id()));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn startup_lock_path_anade_suffix_lock() {
+        let pid = PathBuf::from("/run/pilotwave/worker.pid");
+        assert_eq!(
+            startup_lock_path(&pid),
+            PathBuf::from("/run/pilotwave/worker.pid.lock")
+        );
+        // Sin extensión también: sufijo simple, mismo directorio.
+        let pid = PathBuf::from("/tmp/worker-pid");
+        assert_eq!(
+            startup_lock_path(&pid),
+            PathBuf::from("/tmp/worker-pid.lock")
+        );
+    }
+
+    #[test]
+    fn wait_for_running_ve_guard_y_expira_en_stale() {
+        // Sin holder: expira sin dormir cuando el timeout es cero, y con
+        // timeout corto sobre texto stale.
+        let path = tmp_pid("wait-free");
+        assert_eq!(wait_for_running(&path, Duration::ZERO), None);
+        std::fs::write(&path, "999999999\n").unwrap();
+        assert_eq!(wait_for_running(&path, Duration::from_millis(10)), None);
+        // Con el lock tomado por nosotros: Running solo cuando el identity
+        // check reconoce al proceso de test; si no, sigue siendo Free.
+        let _guard = acquire(&path).expect("acquire");
+        match wait_for_running(&path, Duration::from_millis(10)) {
+            Some(pid) => assert_eq!(pid, std::process::id()),
+            None => assert!(!is_alive_with_identity(std::process::id())),
+        }
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(startup_lock_path(&path));
     }
 }

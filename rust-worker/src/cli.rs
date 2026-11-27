@@ -6,6 +6,9 @@
 //! Behavior:
 //! - Without a subcommand: show help (`arg_required_else_help`).
 //! - `status`: print the counts table (see [`render_status_table`]).
+//! - `is-alive`: one machine-readable liveness line on stdout
+//!   (`fresh|stale|down|error`), exits 0/1/2; read-only, never signals or
+//!   starts anything (cron keep-alive, see ADR-004).
 //! - `run`: execute available tasks (logic in `main.rs` + `db/`).
 //! - `stop`: stop the `--bg` daemon (SIGTERM + wait + SIGKILL,
 //!   idempotent; never touches the DB).
@@ -27,7 +30,7 @@ use crate::db::models::{InspectedTask, ListQuery, ListedTask, QueueStatus, TaskS
 #[command(
     name = "pilotwave-worker",
     version,
-    about = "Drena la cola email de django-tasks-db",
+    about = "Drain the django-tasks-db email queue",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -42,6 +45,20 @@ pub struct Cli {
 pub enum Command {
     /// Show the count of available, in-flight and completed tasks.
     Status,
+    /// Machine-readable liveness probe for cron keep-alive (see ADR-004).
+    ///
+    /// Prints exactly one line on stdout (`fresh age_secs=.. pid=..`,
+    /// `stale age_secs=.. pid=..`, `down reason=..`, `error reason=..`).
+    /// Exit 0 = fresh (nothing to do); 1 = stale/down (restartable: the
+    /// caller runs `run --bg`); 2 = error (bad config / DB unreachable:
+    /// alert, never blind-restart). Read-only: uses the reader DSN when
+    /// configured, never writes, never signals or starts anything.
+    /// Diagnostics stay on stderr so command substitution never breaks.
+    /// `fresh` requires BOTH the local `--bg` daemon (PID-file lock +
+    /// identity) AND a fresh shared heartbeat: a fresh heartbeat from
+    /// another host (or left by a recently stopped local daemon) never
+    /// masks a stopped local daemon (`down reason=daemon_not_running`).
+    IsAlive(IsAliveArgs),
     /// Claim and finalize: one task (`--id`), one generic task, or loop (`--fg`).
     Run(RunArgs),
     /// List tasks by state with pagination.
@@ -58,6 +75,78 @@ pub enum Command {
     /// (different inode) or truncation warn on stderr and reopen from 0.
     /// Never touches the DB.
     Log(LogArgs),
+}
+
+/// Arguments for `is-alive`: the restart policy lives with the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct IsAliveArgs {
+    /// Max heartbeat age in seconds before `stale`. The integrator owns
+    /// the restart threshold (aiph-crm uses 360 for its 5-min cron); the
+    /// default preserves the `fresh`/`stale` meaning from `heartbeat.rs`.
+    /// Kept as a raw string so a malformed value still parses and can be
+    /// reported as the machine-readable `error reason=invalid_max_age_secs`
+    /// line (exit 2) instead of a clap usage error with no stdout line.
+    #[arg(
+        long,
+        default_value = "90",
+        value_name = "N",
+        allow_hyphen_values = true
+    )]
+    pub max_age_secs: String,
+}
+
+/// Validate `--max-age-secs`: a 0 s threshold would report `stale` forever.
+/// Message ready for the `error reason=..` line (single token, no spaces).
+pub fn validate_max_age_secs(n: u64) -> Result<u64, String> {
+    if n >= 1 {
+        Ok(n)
+    } else {
+        Err("invalid_max_age_secs".to_owned())
+    }
+}
+
+/// Parse the raw `--max-age-secs` value: malformed, negative or
+/// out-of-range input maps to the same single-token `invalid_max_age_secs`
+/// reason so the caller can always emit the machine-readable error line.
+pub fn parse_max_age_secs(raw: &str) -> Result<u64, String> {
+    match raw.parse::<u64>() {
+        Ok(n) => validate_max_age_secs(n),
+        Err(_) => Err("invalid_max_age_secs".to_owned()),
+    }
+}
+
+/// Render the `is-alive` fresh line (exactly one line, no trailing newline;
+/// `println!` adds it). `pid` comes from the heartbeat metadata (`n/a`
+/// when the row carries none).
+pub fn render_is_alive_fresh(age_secs: i64, pid: &str) -> String {
+    format!("fresh age_secs={age_secs} pid={pid}")
+}
+
+/// Render the `is-alive` stale line (same shape as fresh; exit 1).
+pub fn render_is_alive_stale(age_secs: i64, pid: &str) -> String {
+    format!("stale age_secs={age_secs} pid={pid}")
+}
+
+/// Render the `is-alive` down line (restartable, exit 1).
+/// `reason` is a single `snake_case` token (`no_heartbeat`).
+pub fn render_is_alive_down(reason: &str) -> String {
+    format!("down reason={reason}")
+}
+
+/// Render the `is-alive` error line (alert, exit 2, never blind-restart).
+/// `reason` is a single `snake_case` token (`db_unavailable`,
+/// `heartbeat_read_failed`, `bad_config`, `invalid_max_age_secs`).
+pub fn render_is_alive_error(reason: &str) -> String {
+    format!("error reason={reason}")
+}
+
+/// Best-effort `pid` for the `is-alive` line from the heartbeat metadata
+/// (`n/a` when missing or garbage; never fails, like `status`).
+pub fn is_alive_pid(metadata: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|v| v.get("pid").and_then(|n| n.as_u64()).map(|n| n.to_string()))
+        .unwrap_or_else(|| "n/a".to_owned())
 }
 
 /// Arguments for `run`: one specific task, one generic task, loop, or daemon.
@@ -147,12 +236,12 @@ impl Pagination {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=200).contains(&self.limit) {
             return Err(format!(
-                "--limit debe estar entre 1 y 200, got {}",
+                "--limit must be between 1 and 200, got {}",
                 self.limit
             ));
         }
         if self.offset < 0 {
-            return Err(format!("--offset debe ser >= 0, got {}", self.offset));
+            return Err(format!("--offset must be >= 0, got {}", self.offset));
         }
         Ok(())
     }
@@ -181,7 +270,7 @@ pub fn validate_log_lines(n: i64) -> Result<u64, String> {
         Ok(n as u64)
     } else {
         Err(format!(
-            "--lines debe estar entre 1 y {LOG_LINES_MAX}, got {n}"
+            "--lines must be between 1 and {LOG_LINES_MAX}, got {n}"
         ))
     }
 }
@@ -212,7 +301,7 @@ fn truncate_chars(value: &str, max: usize) -> String {
         return value.to_owned();
     }
     let truncated: String = value.chars().take(max).collect();
-    format!("{truncated}… [truncado, usa --show-pii]")
+    format!("{truncated}… [truncated, use --show-pii]")
 }
 
 /// Mask an email showing only the domain (`***@domain`); without a valid
@@ -261,7 +350,7 @@ fn redact_args_kwargs(raw: &str) -> String {
                 let len = body.chars().count();
                 map.insert(
                     key.to_owned(),
-                    serde_json::Value::String(format!("[presente: {len} chars]")),
+                    serde_json::Value::String(format!("[present: {len} chars]")),
                 );
             }
         }
@@ -338,7 +427,7 @@ pub fn is_uuid_syntax_error(db_message: &str) -> bool {
 
 /// Clean (usage-style) message for a non-UUID id.
 pub fn render_inspect_uuid_error(id: &str) -> String {
-    format!("id inválido: '{id}' no es un UUID válido; uso: inspect <UUID>")
+    format!("invalid id: '{id}' is not a valid UUID; usage: inspect <UUID>")
 }
 
 /// Map an `inspect` DB error to a user message:
@@ -347,26 +436,24 @@ pub fn format_inspect_error(id: &str, db_message: &str) -> String {
     if is_uuid_syntax_error(db_message) {
         render_inspect_uuid_error(id)
     } else {
-        format!("error al inspeccionar la tarea {id}: {db_message}")
+        format!("error inspecting task {id}: {db_message}")
     }
 }
 ///
 /// Keep rendering separate from `println!` for testing without capturing
 /// stdout. Render the `status` table as text.
-///
-/// Separa el render del `println!` para poder probarlo sin capturar stdout.
 pub fn render_status_table(status: &QueueStatus) -> String {
     let rows = [
-        ("disponibles", status.ready),
-        ("en proceso", status.running),
-        ("completadas", status.done),
+        ("available", status.ready),
+        ("in process", status.running),
+        ("completed", status.done),
     ];
     let label_width = rows
         .iter()
         .map(|(label, _)| label.len())
         .max()
         .unwrap_or(0)
-        .max("estado".len());
+        .max("state".len());
     let value_width = rows
         .iter()
         .map(|(_, value)| value.to_string().len())
@@ -384,7 +471,7 @@ pub fn render_status_table(status: &QueueStatus) -> String {
     out.push('\n');
     out.push_str(&format!(
         "| {:<label_width$} | {:>value_width$} |",
-        "estado", "total"
+        "state", "total"
     ));
     out.push('\n');
     out.push_str(&border);
@@ -423,7 +510,8 @@ pub enum DaemonInfo {
 
 /// Render the `status` daemon section (one line).
 ///
-/// Separa el render del `println!` para poder probarlo sin capturar stdout.
+/// Keep rendering separate from `println!` for testing without capturing
+/// stdout.
 /// Examples:
 /// - `daemon: running pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB)`
 /// - `daemon: running pid=1234 uptime=n/a rss=n/a` (best-effort failure)
@@ -432,9 +520,9 @@ pub enum DaemonInfo {
 pub fn render_daemon_status(state: &DaemonInfo) -> String {
     match state {
         DaemonInfo::NotConfigured => {
-            "daemon: no configurado (PILOTWAVE_PID_FILE ausente)".to_owned()
+            "daemon: not configured (PILOTWAVE_PID_FILE missing)".to_owned()
         }
-        DaemonInfo::NotRunning => "daemon: no corriendo (pidfile stale/unlocked)".to_owned(),
+        DaemonInfo::NotRunning => "daemon: not running (pidfile stale/unlocked)".to_owned(),
         DaemonInfo::Running {
             pid,
             uptime,
@@ -456,7 +544,7 @@ pub fn render_daemon_status(state: &DaemonInfo) -> String {
 /// `metadata` is parsed best-effort: when missing or garbage, fields render
 /// `n/a`/`-` instead of failing (the heartbeat never breaks `status`).
 /// Ejemplos:
-/// - `heartbeat: fresh last_seen=2026-11-19T12:00:00Z (hace 3s) tasks_processed=42 pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB) last_task=… last_error=-`
+/// - `heartbeat: fresh last_seen=2026-11-19T12:00:00Z (3s ago) tasks_processed=42 pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB) last_task=… last_error=-`
 /// - `heartbeat: stale …` (same shape, the worker died or got stuck)
 pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -> String {
     let fresh = crate::heartbeat::freshness(age_secs);
@@ -476,7 +564,7 @@ pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -
         .map(|n| n.to_string())
         .unwrap_or_else(|| "n/a".to_owned());
     format!(
-        "heartbeat: {fresh} last_seen={last_seen} (hace {age_secs}s) \
+        "heartbeat: {fresh} last_seen={last_seen} ({age_secs}s ago) \
          tasks_processed={tasks} pid={pid} uptime={up} rss={rss} \
          last_task={} last_error={}",
         text("last_task_id"),
@@ -489,7 +577,7 @@ pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -
 /// Idempotent (cron-safe): missing, stale or unlocked pidfile, or an
 /// already-dead PID => exit 0 with this line on stdout.
 pub fn render_stop_not_running() -> String {
-    "daemon: no corriendo".to_owned()
+    "daemon: not running".to_owned()
 }
 
 /// `stop` success message after killing the daemon.
@@ -499,9 +587,9 @@ pub fn render_stop_not_running() -> String {
 /// without capturing stdout.
 pub fn render_stop_done(pid: u32, forced: bool) -> String {
     if forced {
-        format!("daemon detenido pid={pid} (SIGKILL)")
+        format!("daemon stopped pid={pid} (SIGKILL)")
     } else {
-        format!("daemon detenido pid={pid}")
+        format!("daemon stopped pid={pid}")
     }
 }
 
@@ -565,9 +653,9 @@ mod tests {
             running: 1,
             done: 42,
         });
-        assert!(table.contains("disponibles"));
-        assert!(table.contains("en proceso"));
-        assert!(table.contains("completadas"));
+        assert!(table.contains("available"));
+        assert!(table.contains("in process"));
+        assert!(table.contains("completed"));
         assert!(table.contains('3'));
         assert!(table.contains("42"));
     }
@@ -871,13 +959,13 @@ mod tests {
         assert!(!out.contains("victima@example.com"));
         assert!(!out.contains("victima@"));
         // Cuerpos como presencia, sin el contenido.
-        assert!(out.contains("[presente:"));
+        assert!(out.contains("[present:"));
         assert!(!out.contains("cuerpo secreto"));
         assert!(!out.contains("<p>secreto</p>"));
         // `subject` y `traceback` truncados con aviso de `--show-pii`.
         assert!(!out.contains(&"s".repeat(200)));
         assert!(!out.contains(&"x".repeat(2000)));
-        assert!(out.contains("usa --show-pii"));
+        assert!(out.contains("use --show-pii"));
     }
 
     #[test]
@@ -943,15 +1031,15 @@ mod tests {
         let other =
             format_inspect_error("550e8400-e29b-41d4-a716-446655440000", "connection refused");
         assert!(other.contains("connection refused"));
-        assert!(!other.contains("no es un UUID válido"));
+        assert!(!other.contains("is not a valid UUID"));
         // Basura + error de sintaxis uuid de Postgres: mensaje limpio.
         let clean = format_inspect_error(
             "no-es-uuid",
             r#"db error: ERROR: invalid input syntax for type uuid: "no-es-uuid""#,
         );
         assert!(clean.contains("no-es-uuid"));
-        assert!(clean.contains("no es un UUID válido"));
-        assert!(clean.contains("uso: inspect <UUID>"));
+        assert!(clean.contains("is not a valid UUID"));
+        assert!(clean.contains("usage: inspect <UUID>"));
         assert!(is_uuid_syntax_error(
             r#"invalid input syntax for type uuid: "x""#
         ));
@@ -1014,15 +1102,15 @@ mod tests {
     }
 
     #[test]
-    fn stop_renders_mensajes_en_espanol() {
+    fn stop_renders_messages_in_english() {
         let idle = render_stop_not_running();
-        assert!(idle.contains("no corriendo"));
+        assert!(idle.contains("not running"));
         let term = render_stop_done(1234, false);
-        assert!(term.contains("detenido"));
+        assert!(term.contains("stopped"));
         assert!(term.contains("pid=1234"));
         assert!(!term.contains("SIGKILL"));
         let kill = render_stop_done(1234, true);
-        assert!(kill.contains("detenido"));
+        assert!(kill.contains("stopped"));
         assert!(kill.contains("pid=1234"));
         assert!(kill.contains("SIGKILL"));
     }
@@ -1030,11 +1118,11 @@ mod tests {
     #[test]
     fn daemon_no_configurado_no_corriendo_y_running_con_o_sin_proc() {
         let out = render_daemon_status(&DaemonInfo::NotConfigured);
-        assert!(out.contains("no configurado"));
+        assert!(out.contains("not configured"));
         assert!(out.contains("PILOTWAVE_PID_FILE"));
 
         let out = render_daemon_status(&DaemonInfo::NotRunning);
-        assert!(out.contains("no corriendo"));
+        assert!(out.contains("not running"));
         assert!(out.contains("stale/unlocked"));
 
         let out = render_daemon_status(&DaemonInfo::Running {
@@ -1088,5 +1176,103 @@ mod tests {
         assert!(out.contains("uptime=n/a"));
         assert!(out.contains("rss=n/a"));
         assert!(out.contains("last_task=-"));
+    }
+
+    #[test]
+    fn is_alive_parsea_default_90_y_max_age_custom() {
+        let cli = Cli::try_parse_from(["pilotwave-worker", "is-alive"]).unwrap();
+        let Command::IsAlive(args) = cli.command else {
+            panic!("se esperaba Command::IsAlive");
+        };
+        assert_eq!(args.max_age_secs, "90");
+        assert_eq!(parse_max_age_secs(&args.max_age_secs), Ok(90));
+        let cli =
+            Cli::try_parse_from(["pilotwave-worker", "is-alive", "--max-age-secs", "360"]).unwrap();
+        let Command::IsAlive(args) = cli.command else {
+            panic!("se esperaba Command::IsAlive");
+        };
+        assert_eq!(args.max_age_secs, "360");
+        assert_eq!(parse_max_age_secs(&args.max_age_secs), Ok(360));
+        // Malformed values still parse as raw strings so `run()` can emit
+        // the machine-readable `error reason=invalid_max_age_secs` line
+        // instead of a clap usage error with no stdout line.
+        for bad in ["abc", "-1", "0", "", "12.5", "9999999999999999999999999"] {
+            let cli = Cli::try_parse_from(["pilotwave-worker", "is-alive", "--max-age-secs", bad])
+                .unwrap();
+            let Command::IsAlive(args) = cli.command else {
+                panic!("se esperaba Command::IsAlive");
+            };
+            assert_eq!(args.max_age_secs, bad);
+            let err = parse_max_age_secs(&args.max_age_secs).expect_err("debe fallar");
+            assert_eq!(err, "invalid_max_age_secs");
+        }
+        // Sin subcomando sigue fallando con ayuda (is-alive no es default).
+        let err =
+            Cli::try_parse_from(["pilotwave-worker"]).expect_err("debe fallar sin subcomando");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn is_alive_validate_rechaza_cero() {
+        assert_eq!(validate_max_age_secs(1), Ok(1));
+        assert_eq!(validate_max_age_secs(90), Ok(90));
+        assert_eq!(validate_max_age_secs(360), Ok(360));
+        let err = validate_max_age_secs(0).expect_err("0 debe fallar");
+        assert!(!err.contains(' '), "reason de un solo token, got: {err}");
+        assert_eq!(parse_max_age_secs("90"), Ok(90));
+        assert_eq!(parse_max_age_secs("1"), Ok(1));
+        for bad in ["0", "abc", "-1", "", "12.5", "9999999999999999999999999"] {
+            let err = parse_max_age_secs(bad).expect_err("debe fallar");
+            assert_eq!(err, "invalid_max_age_secs");
+        }
+    }
+
+    #[test]
+    fn is_alive_render_una_sola_linea_maquina_legible() {
+        let fresh = render_is_alive_fresh(3, "1234");
+        assert_eq!(fresh, "fresh age_secs=3 pid=1234");
+        let stale = render_is_alive_stale(3600, "1234");
+        assert_eq!(stale, "stale age_secs=3600 pid=1234");
+        let down = render_is_alive_down("no_heartbeat");
+        assert_eq!(down, "down reason=no_heartbeat");
+        let error = render_is_alive_error("db_unavailable");
+        assert_eq!(error, "error reason=db_unavailable");
+        for line in [&fresh, &stale] {
+            assert!(!line.contains('\n'), "una sola línea, got: {line:?}");
+            assert_eq!(
+                line.split_whitespace().count(),
+                3,
+                "tres campos, got: {line:?}"
+            );
+        }
+        for line in [&down, &error] {
+            assert!(!line.contains('\n'), "una sola línea, got: {line:?}");
+            assert_eq!(
+                line.split_whitespace().count(),
+                2,
+                "dos campos, got: {line:?}"
+            );
+        }
+        // Primera palabra: fresh|stale|down|error.
+        for (line, first) in [
+            (render_is_alive_fresh(0, "n/a"), "fresh"),
+            (render_is_alive_stale(91, "n/a"), "stale"),
+            (render_is_alive_down("no_heartbeat"), "down"),
+            (render_is_alive_error("bad_config"), "error"),
+        ] {
+            assert_eq!(line.split_whitespace().next().unwrap(), first);
+        }
+    }
+
+    #[test]
+    fn is_alive_pid_best_effort_nunca_falla() {
+        let meta = serde_json::json!({"pid": 1234}).to_string();
+        assert_eq!(is_alive_pid(&meta), "1234");
+        assert_eq!(is_alive_pid("no-es-json{"), "n/a");
+        assert_eq!(is_alive_pid("{}"), "n/a");
+        assert_eq!(is_alive_pid(r#"{"pid": null}"#), "n/a");
     }
 }

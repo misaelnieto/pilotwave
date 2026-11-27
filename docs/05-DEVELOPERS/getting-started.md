@@ -23,6 +23,7 @@ just dev-up              # start local Postgres
 just migrate             # apply Pilotwave migrations
 just run-worker          # claim + send one READY task (oneshot)
 just worker-status       # queue counts + daemon + heartbeat
+just is-alive            # liveness probe: one line, exits 0/1/2 (cron keep-alive)
 just test                # Python + Rust tests
 just lint                # ruff + cargo fmt/clippy (readonly)
 just format              # autofix/format both languages
@@ -57,57 +58,29 @@ just inspect <UUID>              # every column of one queue row
 just log -- -n 50 -f             # last 50 lines, then follow appends
 ```
 
-`status`, `run`, `list` and `inspect` need `PILOTWAVE_DATABASE_URL` plus a
-live Postgres; `log` and `stop` never touch the database (`stop` only
-signals the daemon via `PILOTWAVE_PID_FILE`). Run any binary with `--help`
+`status`, `run`, `list`, `inspect` and `is-alive` need
+`PILOTWAVE_DATABASE_URL` plus a live Postgres; the read-only ones reuse
+`PILOTWAVE_DATABASE_URL_RO` when it is set. `log` and `stop` never touch
+the database (`stop` only signals the daemon via `PILOTWAVE_PID_FILE`).
+`inspect --show-pii` prints full PII (recipients, bodies, traceback)
+and is operators-only. Run any binary with `--help`
 (`just` passes it through the same way, e.g. `just log -- --help`) for the
 full flag reference.
 
-## Configuration
+## Operator topics (SSOT in the user guide)
 
-All connection settings come from environment variables; see the documented
-[`.env.example`](../../.env.example). The real worker uses
-`PILOTWAVE_DATABASE_URL` with a least-privilege role, never `DATABASE_URL`.
+`is-alive` + cron, attachment roots and the Mailcrab env block are
+documented for operators in
+[03-DEPLOYMENT.md](../07-USER-GUIDE/03-DEPLOYMENT.md)
+([ADR-004](../02-DECISIONS/004-is-alive-subcommand.md)) and
+[02-CONFIGURATION.md](../07-USER-GUIDE/02-CONFIGURATION.md)
+([ADR-003](../02-DECISIONS/003-anonymous-smtp-opt-in.md)). Fixed cron
+one-liner (only exit 1 restarts, never exit 2; lock path arbitrary):
 
-### Attachment roots (required, no fallback)
-
-`PILOTWAVE_ATTACHMENT_ROOTS` has **no `MEDIA_ROOT` fallback, not even in
-dev**. An empty/missing value means deny-all: every send with attachments
-fails closed with `path_policy_violation`. Wiring explicit absolute roots
-is the Developer/Integrator's responsibility:
-
-```bash
-# .env — comma-separated absolute prefixes owned by the producer project
-PILOTWAVE_ATTACHMENT_ROOTS=/home/user/apps/myapp/media,/home/user/apps/myapp/uploads
+```cron
+*/5 * * * * set -a && . /etc/pilotwave/worker.env && set +a && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
 ```
 
-Checklist: create the directories in the producer project, mount/copy the
-same paths where the worker runs, keep them absolute, never point them at
-`/`, and restart the worker after changing them. The rule is enforced by
-`pilotwave-worker`; no Python fallback sender ships in v1 (P-5 decided).
-
-### Dev SMTP without AUTH (Mailcrab)
-
-Mailcrab (`just dev-up`, SMTP `:1025`) advertises no AUTH extension, so the
-worker cannot log in to it. For local dev only, run without credentials:
-leave `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` empty (whitespace = absent)
-and set both opt-ins:
-
-```dotenv
-EMAIL_HOST=localhost
-EMAIL_PORT=1025
-EMAIL_USE_TLS=false
-PILOTWAVE_ALLOW_PLAINTEXT_SMTP=true
-PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true
-```
-
-Rules (fail loud, see ADR `003-anonymous-smtp-opt-in`): user+pass go together
-(only one set = startup error); no AUTH is accepted only when the host is
-loopback (`localhost`/`127.*`/`::1`) **and** `EMAIL_USE_TLS=false` (with the
-plaintext opt-in) **and** `PILOTWAVE_ALLOW_ANONYMOUS_SMTP=true`. A typo in the
-host fails closed instead of sending unauthenticated mail elsewhere. The
-worker logs a `WARNING ... sin AUTH` on stderr at startup. Never enable the
-anonymous flag outside dev/loopback.
-
-Booleans are `django-environ`-style (case-insensitive): `true`/`1`/`yes`/`y`/
-`on` and `false`/`0`/`no`/`n`/`off`; any other value is a startup error.
+Dev-only notes: `just dev-up` provides that Mailcrab (`:1025` SMTP,
+`:1080` UI); `just is-alive` and `just run-worker -- --bg` wrap the
+same probe and daemon.

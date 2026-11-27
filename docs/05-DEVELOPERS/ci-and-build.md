@@ -37,10 +37,10 @@ the glibc variants found on shared hosts.
 recipes in the same order as local development:
 
 ```bash
+just pre-install-check
+just lint
 just sync
 just test
-just lint
-just build
 ```
 
 No service containers are needed: the tests are DB-free (SQLite for Python,

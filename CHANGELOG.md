@@ -2,6 +2,32 @@
 
 <!-- version list -->
 
+## Unreleased
+
+### Features
+
+- `is-alive` liveness subcommand for cron keep-alive (ADR-004): one
+  machine-readable stdout line (`fresh|stale|down|error`), exits 0/1/2,
+  `--max-age-secs` (default 90), read-only via the reader DSN; docs in
+  `docs/05-DEVELOPERS/getting-started.md` and `README.md`.
+- New black-box user guide in `docs/07-USER-GUIDE/` (quickstart,
+  configuration reference, deployment) for wheel users; no Rust or
+  `just` required.
+
+### Changed
+
+- Worker CLI messages are now all in English (`status` table headers
+  and labels, daemon/stop/inspect/log messages). Parse English output
+  from this version on.
+
+### Documentation
+
+- Slim root `README.md` to pitch + why + how-it-looks + pointers;
+  full benchmark table moved to `benchmark/README.md`.
+- Reorganized docs map (`docs/README.md` now indexes `06-AUDITS` and
+  `07-USER-GUIDE`); trimmed `05-DEVELOPERS` operator topics to links
+  into the user guide.
+
 ## v0.3.0 (2026-11-26)
 
 ### Features
