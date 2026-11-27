@@ -144,10 +144,16 @@ Copy-paste one-liner (cron must see the same variables as the
 worker, hence the env file; only exit 1 restarts):
 
 ```cron
-*/5 * * * * . /etc/pilotwave/worker.env && flock -n /run/pilotwave/keepalive.lock pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg
+*/5 * * * * . /etc/pilotwave/worker.env && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
 ```
 
-`flock -n` keeps two probe runs from overlapping. Point it at the
+`flock -n` holds the same lock across both the probe and the
+conditional restart, so two cron ticks never overlap: a second tick
+exits immediately while one probe+restart sequence is still in flight
+instead of probing stale state and spawning a duplicate daemon. (`run
+--bg` additionally serializes concurrent starters on
+`<pidfile>.lock` and never overwrites the winning child's PID, so even
+a manual double start stays idempotent.) Point it at the
 real binary path (for example `/srv/app/.venv/bin/pilotwave-worker`)
 if `pilotwave-worker` is not on cron's `PATH`.
 
