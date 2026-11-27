@@ -78,13 +78,21 @@ pub enum Command {
 }
 
 /// Arguments for `is-alive`: the restart policy lives with the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Args)]
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct IsAliveArgs {
     /// Max heartbeat age in seconds before `stale`. The integrator owns
     /// the restart threshold (aiph-crm uses 360 for its 5-min cron); the
     /// default preserves the `fresh`/`stale` meaning from `heartbeat.rs`.
-    #[arg(long, default_value_t = 90, value_name = "N")]
-    pub max_age_secs: u64,
+    /// Kept as a raw string so a malformed value still parses and can be
+    /// reported as the machine-readable `error reason=invalid_max_age_secs`
+    /// line (exit 2) instead of a clap usage error with no stdout line.
+    #[arg(
+        long,
+        default_value = "90",
+        value_name = "N",
+        allow_hyphen_values = true
+    )]
+    pub max_age_secs: String,
 }
 
 /// Validate `--max-age-secs`: a 0 s threshold would report `stale` forever.
@@ -94,6 +102,16 @@ pub fn validate_max_age_secs(n: u64) -> Result<u64, String> {
         Ok(n)
     } else {
         Err("invalid_max_age_secs".to_owned())
+    }
+}
+
+/// Parse the raw `--max-age-secs` value: malformed, negative or
+/// out-of-range input maps to the same single-token `invalid_max_age_secs`
+/// reason so the caller can always emit the machine-readable error line.
+pub fn parse_max_age_secs(raw: &str) -> Result<u64, String> {
+    match raw.parse::<u64>() {
+        Ok(n) => validate_max_age_secs(n),
+        Err(_) => Err("invalid_max_age_secs".to_owned()),
     }
 }
 
@@ -1166,13 +1184,28 @@ mod tests {
         let Command::IsAlive(args) = cli.command else {
             panic!("se esperaba Command::IsAlive");
         };
-        assert_eq!(args.max_age_secs, 90);
+        assert_eq!(args.max_age_secs, "90");
+        assert_eq!(parse_max_age_secs(&args.max_age_secs), Ok(90));
         let cli =
             Cli::try_parse_from(["pilotwave-worker", "is-alive", "--max-age-secs", "360"]).unwrap();
         let Command::IsAlive(args) = cli.command else {
             panic!("se esperaba Command::IsAlive");
         };
-        assert_eq!(args.max_age_secs, 360);
+        assert_eq!(args.max_age_secs, "360");
+        assert_eq!(parse_max_age_secs(&args.max_age_secs), Ok(360));
+        // Malformed values still parse as raw strings so `run()` can emit
+        // the machine-readable `error reason=invalid_max_age_secs` line
+        // instead of a clap usage error with no stdout line.
+        for bad in ["abc", "-1", "0", "", "12.5", "9999999999999999999999999"] {
+            let cli = Cli::try_parse_from(["pilotwave-worker", "is-alive", "--max-age-secs", bad])
+                .unwrap();
+            let Command::IsAlive(args) = cli.command else {
+                panic!("se esperaba Command::IsAlive");
+            };
+            assert_eq!(args.max_age_secs, bad);
+            let err = parse_max_age_secs(&args.max_age_secs).expect_err("debe fallar");
+            assert_eq!(err, "invalid_max_age_secs");
+        }
         // Sin subcomando sigue fallando con ayuda (is-alive no es default).
         let err =
             Cli::try_parse_from(["pilotwave-worker"]).expect_err("debe fallar sin subcomando");
@@ -1189,6 +1222,12 @@ mod tests {
         assert_eq!(validate_max_age_secs(360), Ok(360));
         let err = validate_max_age_secs(0).expect_err("0 debe fallar");
         assert!(!err.contains(' '), "reason de un solo token, got: {err}");
+        assert_eq!(parse_max_age_secs("90"), Ok(90));
+        assert_eq!(parse_max_age_secs("1"), Ok(1));
+        for bad in ["0", "abc", "-1", "", "12.5", "9999999999999999999999999"] {
+            let err = parse_max_age_secs(bad).expect_err("debe fallar");
+            assert_eq!(err, "invalid_max_age_secs");
+        }
     }
 
     #[test]

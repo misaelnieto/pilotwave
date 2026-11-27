@@ -197,9 +197,9 @@ impl Worker {
     pub async fn run_is_alive(
         &self,
         daemon: Option<&DaemonInfo>,
-        max_age_secs: u64,
+        max_age_secs: &str,
     ) -> Result<ExitCode> {
-        let Ok(max_age) = cli::validate_max_age_secs(max_age_secs) else {
+        let Ok(max_age) = cli::parse_max_age_secs(max_age_secs) else {
             println!("{}", cli::render_is_alive_error("invalid_max_age_secs"));
             return Ok(ExitCode::from(2));
         };
@@ -214,29 +214,27 @@ impl Worker {
                 return Ok(ExitCode::from(2));
             }
         }
-        let heartbeat = match tokio::time::timeout(
-            IS_ALIVE_HEARTBEAT_TIMEOUT,
-            self.store.read_heartbeat(),
-        )
-        .await
-        {
-            Err(_) => {
-                // stderr, never stdout: the probe line stays machine-readable.
-                eprintln!(
-                    "WARNING pilotwave-worker: is-alive: heartbeat timed out after {}s",
-                    IS_ALIVE_HEARTBEAT_TIMEOUT.as_secs()
-                );
-                println!("{}", cli::render_is_alive_error("heartbeat_read_timeout"));
-                return Ok(ExitCode::from(2));
-            }
-            Ok(Err(err)) => {
-                // stderr, never stdout: the probe line stays machine-readable.
-                eprintln!("WARNING pilotwave-worker: is-alive: heartbeat unreadable: {err}");
-                println!("{}", cli::render_is_alive_error("heartbeat_read_failed"));
-                return Ok(ExitCode::from(2));
-            }
-            Ok(Ok(heartbeat)) => heartbeat,
-        };
+        let heartbeat =
+            match tokio::time::timeout(IS_ALIVE_HEARTBEAT_TIMEOUT, self.store.read_heartbeat())
+                .await
+            {
+                Err(_) => {
+                    // stderr, never stdout: the probe line stays machine-readable.
+                    eprintln!(
+                        "WARNING pilotwave-worker: is-alive: heartbeat timed out after {}s",
+                        IS_ALIVE_HEARTBEAT_TIMEOUT.as_secs()
+                    );
+                    println!("{}", cli::render_is_alive_error("heartbeat_read_timeout"));
+                    return Ok(ExitCode::from(2));
+                }
+                Ok(Err(err)) => {
+                    // stderr, never stdout: the probe line stays machine-readable.
+                    eprintln!("WARNING pilotwave-worker: is-alive: heartbeat unreadable: {err}");
+                    println!("{}", cli::render_is_alive_error("heartbeat_read_failed"));
+                    return Ok(ExitCode::from(2));
+                }
+                Ok(Ok(heartbeat)) => heartbeat,
+            };
         let Some(hb) = heartbeat else {
             println!("{}", cli::render_is_alive_down("no_heartbeat"));
             return Ok(ExitCode::from(1));

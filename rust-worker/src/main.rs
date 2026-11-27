@@ -46,6 +46,16 @@ async fn run() -> worker::Result<ExitCode> {
     // instead of the generic `fatal` (exit 1), so the line stays
     // machine-readable; the detail goes to stderr.
     let is_alive = matches!(cli.command, cli::Command::IsAlive(_));
+    // Threshold parsing runs before config/DB so a malformed
+    // `--max-age-secs` always reports `invalid_max_age_secs` (exit 2)
+    // instead of being masked by `bad_config` or `db_unavailable`.
+    if let cli::Command::IsAlive(args) = &cli.command
+        && let Err(reason) = cli::parse_max_age_secs(&args.max_age_secs)
+    {
+        eprintln!("error: invalid --max-age-secs: {:?}", args.max_age_secs);
+        println!("{}", cli::render_is_alive_error(&reason));
+        return Ok(ExitCode::from(2));
+    }
     let bad_config = |msg: String| -> worker::Result<ExitCode> {
         if is_alive {
             eprintln!("error: {msg}");
@@ -247,7 +257,7 @@ async fn run() -> worker::Result<ExitCode> {
             // (or left by a recently stopped local daemon) must not mask
             // a stopped local daemon, or cron would skip the restart.
             return worker
-                .run_is_alive(daemon_info.as_ref(), args.max_age_secs)
+                .run_is_alive(daemon_info.as_ref(), &args.max_age_secs)
                 .await;
         }
         cli::Command::Inspect(args) => {
