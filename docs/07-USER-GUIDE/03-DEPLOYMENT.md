@@ -144,7 +144,7 @@ Copy-paste one-liner (cron must see the same variables as the
 worker, hence the env file; only exit 1 restarts):
 
 ```cron
-*/5 * * * * . /etc/pilotwave/worker.env && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
+*/5 * * * * set -a && . /etc/pilotwave/worker.env && set +a && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
 ```
 
 `flock -n` holds the same lock across both the probe and the

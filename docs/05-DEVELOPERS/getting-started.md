@@ -78,7 +78,7 @@ documented for operators in
 one-liner (only exit 1 restarts, never exit 2; lock path arbitrary):
 
 ```cron
-*/5 * * * * . /etc/pilotwave/worker.env && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
+*/5 * * * * set -a && . /etc/pilotwave/worker.env && set +a && flock -n /run/pilotwave/keepalive.lock sh -c 'pilotwave-worker is-alive --max-age-secs 360; [ $? -eq 1 ] && pilotwave-worker run --bg'
 ```
 
 Dev-only notes: `just dev-up` provides that Mailcrab (`:1025` SMTP,
