@@ -222,7 +222,7 @@ impl Worker {
             return Ok(ExitCode::from(1));
         };
         let pid = cli::is_alive_pid(&hb.metadata);
-        if hb.age_secs <= max_age as i64 {
+        if hb.age_secs < 0 || (hb.age_secs as u64) <= max_age {
             println!("{}", cli::render_is_alive_fresh(hb.age_secs, &pid));
             Ok(ExitCode::SUCCESS)
         } else {
