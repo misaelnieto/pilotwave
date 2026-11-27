@@ -30,7 +30,7 @@ use crate::db::models::{InspectedTask, ListQuery, ListedTask, QueueStatus, TaskS
 #[command(
     name = "pilotwave-worker",
     version,
-    about = "Drena la cola email de django-tasks-db",
+    about = "Drain the django-tasks-db email queue",
     arg_required_else_help = true
 )]
 pub struct Cli {
@@ -214,12 +214,12 @@ impl Pagination {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=200).contains(&self.limit) {
             return Err(format!(
-                "--limit debe estar entre 1 y 200, got {}",
+                "--limit must be between 1 and 200, got {}",
                 self.limit
             ));
         }
         if self.offset < 0 {
-            return Err(format!("--offset debe ser >= 0, got {}", self.offset));
+            return Err(format!("--offset must be >= 0, got {}", self.offset));
         }
         Ok(())
     }
@@ -248,7 +248,7 @@ pub fn validate_log_lines(n: i64) -> Result<u64, String> {
         Ok(n as u64)
     } else {
         Err(format!(
-            "--lines debe estar entre 1 y {LOG_LINES_MAX}, got {n}"
+            "--lines must be between 1 and {LOG_LINES_MAX}, got {n}"
         ))
     }
 }
@@ -279,7 +279,7 @@ fn truncate_chars(value: &str, max: usize) -> String {
         return value.to_owned();
     }
     let truncated: String = value.chars().take(max).collect();
-    format!("{truncated}… [truncado, usa --show-pii]")
+    format!("{truncated}… [truncated, use --show-pii]")
 }
 
 /// Mask an email showing only the domain (`***@domain`); without a valid
@@ -328,7 +328,7 @@ fn redact_args_kwargs(raw: &str) -> String {
                 let len = body.chars().count();
                 map.insert(
                     key.to_owned(),
-                    serde_json::Value::String(format!("[presente: {len} chars]")),
+                    serde_json::Value::String(format!("[present: {len} chars]")),
                 );
             }
         }
@@ -405,7 +405,7 @@ pub fn is_uuid_syntax_error(db_message: &str) -> bool {
 
 /// Clean (usage-style) message for a non-UUID id.
 pub fn render_inspect_uuid_error(id: &str) -> String {
-    format!("id inválido: '{id}' no es un UUID válido; uso: inspect <UUID>")
+    format!("invalid id: '{id}' is not a valid UUID; usage: inspect <UUID>")
 }
 
 /// Map an `inspect` DB error to a user message:
@@ -414,26 +414,24 @@ pub fn format_inspect_error(id: &str, db_message: &str) -> String {
     if is_uuid_syntax_error(db_message) {
         render_inspect_uuid_error(id)
     } else {
-        format!("error al inspeccionar la tarea {id}: {db_message}")
+        format!("error inspecting task {id}: {db_message}")
     }
 }
 ///
 /// Keep rendering separate from `println!` for testing without capturing
 /// stdout. Render the `status` table as text.
-///
-/// Separa el render del `println!` para poder probarlo sin capturar stdout.
 pub fn render_status_table(status: &QueueStatus) -> String {
     let rows = [
-        ("disponibles", status.ready),
-        ("en proceso", status.running),
-        ("completadas", status.done),
+        ("available", status.ready),
+        ("in process", status.running),
+        ("completed", status.done),
     ];
     let label_width = rows
         .iter()
         .map(|(label, _)| label.len())
         .max()
         .unwrap_or(0)
-        .max("estado".len());
+        .max("state".len());
     let value_width = rows
         .iter()
         .map(|(_, value)| value.to_string().len())
@@ -451,7 +449,7 @@ pub fn render_status_table(status: &QueueStatus) -> String {
     out.push('\n');
     out.push_str(&format!(
         "| {:<label_width$} | {:>value_width$} |",
-        "estado", "total"
+        "state", "total"
     ));
     out.push('\n');
     out.push_str(&border);
@@ -490,7 +488,8 @@ pub enum DaemonInfo {
 
 /// Render the `status` daemon section (one line).
 ///
-/// Separa el render del `println!` para poder probarlo sin capturar stdout.
+/// Keep rendering separate from `println!` for testing without capturing
+/// stdout.
 /// Examples:
 /// - `daemon: running pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB)`
 /// - `daemon: running pid=1234 uptime=n/a rss=n/a` (best-effort failure)
@@ -499,9 +498,9 @@ pub enum DaemonInfo {
 pub fn render_daemon_status(state: &DaemonInfo) -> String {
     match state {
         DaemonInfo::NotConfigured => {
-            "daemon: no configurado (PILOTWAVE_PID_FILE ausente)".to_owned()
+            "daemon: not configured (PILOTWAVE_PID_FILE missing)".to_owned()
         }
-        DaemonInfo::NotRunning => "daemon: no corriendo (pidfile stale/unlocked)".to_owned(),
+        DaemonInfo::NotRunning => "daemon: not running (pidfile stale/unlocked)".to_owned(),
         DaemonInfo::Running {
             pid,
             uptime,
@@ -523,7 +522,7 @@ pub fn render_daemon_status(state: &DaemonInfo) -> String {
 /// `metadata` is parsed best-effort: when missing or garbage, fields render
 /// `n/a`/`-` instead of failing (the heartbeat never breaks `status`).
 /// Ejemplos:
-/// - `heartbeat: fresh last_seen=2026-11-19T12:00:00Z (hace 3s) tasks_processed=42 pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB) last_task=… last_error=-`
+/// - `heartbeat: fresh last_seen=2026-11-19T12:00:00Z (3s ago) tasks_processed=42 pid=1234 uptime=1h2m3s rss=4192 kB (4.1 MB) last_task=… last_error=-`
 /// - `heartbeat: stale …` (same shape, the worker died or got stuck)
 pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -> String {
     let fresh = crate::heartbeat::freshness(age_secs);
@@ -543,7 +542,7 @@ pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -
         .map(|n| n.to_string())
         .unwrap_or_else(|| "n/a".to_owned());
     format!(
-        "heartbeat: {fresh} last_seen={last_seen} (hace {age_secs}s) \
+        "heartbeat: {fresh} last_seen={last_seen} ({age_secs}s ago) \
          tasks_processed={tasks} pid={pid} uptime={up} rss={rss} \
          last_task={} last_error={}",
         text("last_task_id"),
@@ -556,7 +555,7 @@ pub fn render_heartbeat_status(age_secs: i64, last_seen: &str, metadata: &str) -
 /// Idempotent (cron-safe): missing, stale or unlocked pidfile, or an
 /// already-dead PID => exit 0 with this line on stdout.
 pub fn render_stop_not_running() -> String {
-    "daemon: no corriendo".to_owned()
+    "daemon: not running".to_owned()
 }
 
 /// `stop` success message after killing the daemon.
@@ -566,9 +565,9 @@ pub fn render_stop_not_running() -> String {
 /// without capturing stdout.
 pub fn render_stop_done(pid: u32, forced: bool) -> String {
     if forced {
-        format!("daemon detenido pid={pid} (SIGKILL)")
+        format!("daemon stopped pid={pid} (SIGKILL)")
     } else {
-        format!("daemon detenido pid={pid}")
+        format!("daemon stopped pid={pid}")
     }
 }
 
@@ -632,9 +631,9 @@ mod tests {
             running: 1,
             done: 42,
         });
-        assert!(table.contains("disponibles"));
-        assert!(table.contains("en proceso"));
-        assert!(table.contains("completadas"));
+        assert!(table.contains("available"));
+        assert!(table.contains("in process"));
+        assert!(table.contains("completed"));
         assert!(table.contains('3'));
         assert!(table.contains("42"));
     }
@@ -938,13 +937,13 @@ mod tests {
         assert!(!out.contains("victima@example.com"));
         assert!(!out.contains("victima@"));
         // Cuerpos como presencia, sin el contenido.
-        assert!(out.contains("[presente:"));
+        assert!(out.contains("[present:"));
         assert!(!out.contains("cuerpo secreto"));
         assert!(!out.contains("<p>secreto</p>"));
         // `subject` y `traceback` truncados con aviso de `--show-pii`.
         assert!(!out.contains(&"s".repeat(200)));
         assert!(!out.contains(&"x".repeat(2000)));
-        assert!(out.contains("usa --show-pii"));
+        assert!(out.contains("use --show-pii"));
     }
 
     #[test]
@@ -1010,15 +1009,15 @@ mod tests {
         let other =
             format_inspect_error("550e8400-e29b-41d4-a716-446655440000", "connection refused");
         assert!(other.contains("connection refused"));
-        assert!(!other.contains("no es un UUID válido"));
+        assert!(!other.contains("is not a valid UUID"));
         // Basura + error de sintaxis uuid de Postgres: mensaje limpio.
         let clean = format_inspect_error(
             "no-es-uuid",
             r#"db error: ERROR: invalid input syntax for type uuid: "no-es-uuid""#,
         );
         assert!(clean.contains("no-es-uuid"));
-        assert!(clean.contains("no es un UUID válido"));
-        assert!(clean.contains("uso: inspect <UUID>"));
+        assert!(clean.contains("is not a valid UUID"));
+        assert!(clean.contains("usage: inspect <UUID>"));
         assert!(is_uuid_syntax_error(
             r#"invalid input syntax for type uuid: "x""#
         ));
@@ -1081,15 +1080,15 @@ mod tests {
     }
 
     #[test]
-    fn stop_renders_mensajes_en_espanol() {
+    fn stop_renders_messages_in_english() {
         let idle = render_stop_not_running();
-        assert!(idle.contains("no corriendo"));
+        assert!(idle.contains("not running"));
         let term = render_stop_done(1234, false);
-        assert!(term.contains("detenido"));
+        assert!(term.contains("stopped"));
         assert!(term.contains("pid=1234"));
         assert!(!term.contains("SIGKILL"));
         let kill = render_stop_done(1234, true);
-        assert!(kill.contains("detenido"));
+        assert!(kill.contains("stopped"));
         assert!(kill.contains("pid=1234"));
         assert!(kill.contains("SIGKILL"));
     }
@@ -1097,11 +1096,11 @@ mod tests {
     #[test]
     fn daemon_no_configurado_no_corriendo_y_running_con_o_sin_proc() {
         let out = render_daemon_status(&DaemonInfo::NotConfigured);
-        assert!(out.contains("no configurado"));
+        assert!(out.contains("not configured"));
         assert!(out.contains("PILOTWAVE_PID_FILE"));
 
         let out = render_daemon_status(&DaemonInfo::NotRunning);
-        assert!(out.contains("no corriendo"));
+        assert!(out.contains("not running"));
         assert!(out.contains("stale/unlocked"));
 
         let out = render_daemon_status(&DaemonInfo::Running {

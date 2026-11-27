@@ -1,7 +1,7 @@
 //! Worker logic: claim, processing and loops.
 //!
 //! `main.rs` stays a thin bootstrap (parse, config, dispatch without DB)
-//! and delegates here for oneshots (`status`/`inspect`/`list`/single `run`)
+//! and delegates here for oneshots (`status`/`is-alive`/`inspect`/`list`/single `run`)
 //! and loops (`run --fg` / `run --bg-child`). Messages, exit codes and
 //! stdout/stderr stay unchanged.
 
@@ -109,7 +109,7 @@ pub(crate) async fn shutdown_signal() {
 /// Single connection attempt, with infinite retry + backoff.
 ///
 /// Only for the persistent loop (`run --fg`): one-shots (`status`,
-/// `list`, `inspect`, `run` without `--fg`) use `db::connect` directly and
+/// `is-alive`, `list`, `inspect`, `run` without `--fg`) use `db::connect` directly and
 /// fail loud. Returns `None` when SIGTERM/SIGINT arrives while waiting:
 /// the caller exits with `Ok(())` (exit 0).
 pub(crate) async fn connect_with_backoff(database_url: &str) -> Option<sqlx::postgres::PgPool> {
@@ -121,13 +121,13 @@ pub(crate) async fn connect_with_backoff(database_url: &str) -> Option<sqlx::pos
                 failures = failures.saturating_add(1);
                 let delay = db_reconnect_delay(failures);
                 logging::warn(&format!(
-                    "postgres no disponible (intento {failures}): {err}; reintentando en {}s",
+                    "postgres unavailable (attempt {failures}): {err}; retrying in {}s",
                     delay.as_secs()
                 ));
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     _ = shutdown_signal() => {
-                        logging::info("shutdown durante reconexión a BD, saliendo");
+                        logging::info("shutdown during DB reconnect, exiting");
                         return None;
                     }
                 }
@@ -167,7 +167,7 @@ impl Worker {
                 "{}",
                 cli::render_heartbeat_status(hb.age_secs, &hb.last_seen, &hb.metadata)
             ),
-            None => println!("heartbeat: never_run (el sidecar aún no escribió)"),
+            None => println!("heartbeat: never_run (the sidecar has not written yet)"),
         }
         Ok(())
     }
@@ -188,7 +188,7 @@ impl Worker {
             Ok(heartbeat) => heartbeat,
             Err(err) => {
                 // stderr, never stdout: the probe line stays machine-readable.
-                eprintln!("WARNING pilotwave-worker: is-alive: heartbeat no legible: {err}");
+                eprintln!("WARNING pilotwave-worker: is-alive: heartbeat unreadable: {err}");
                 println!("{}", cli::render_is_alive_error("heartbeat_read_failed"));
                 return Ok(ExitCode::from(2));
             }
@@ -219,7 +219,7 @@ impl Worker {
                 Err(invalid_input(msg))
             }
             Ok(None) => {
-                println!("no existe ninguna tarea con id {id}");
+                println!("no task exists with id {id}");
                 Ok(())
             }
             Ok(Some(task)) => {
@@ -240,7 +240,7 @@ impl Worker {
     pub async fn run_once(&self, id: Option<&str>) -> Result<()> {
         // Scope metadata only: no secrets or bodies.
         logging::debug(&format!(
-            "alcance claim queue={} backend={} tasks={} worker_id={}",
+            "claim scope queue={} backend={} tasks={} worker_id={}",
             self.config.queue_name,
             self.config.backend_name,
             self.config.task_paths.join(","),
@@ -267,12 +267,12 @@ impl Worker {
                     Err(invalid_input(msg))
                 }
                 Ok(None) => {
-                    logging::info(&format!("no existe ninguna tarea con id {id}"));
+                    logging::info(&format!("no task exists with id {id}"));
                     Ok(())
                 }
                 Ok(Some(row)) => {
                     logging::info(&format!(
-                        "tarea {id} no ejecutable: status={} queue={} backend={} task_path={}",
+                        "task {id} not runnable: status={} queue={} backend={} task_path={}",
                         row.status, row.queue_name, row.backend_name, row.task_path
                     ));
                     Ok(())
@@ -299,7 +299,7 @@ impl Worker {
                 // `detail` may carry attacker text: shown sanitized
                 // (same as persisted).
                 logging::debug(&format!(
-                    "payload rechazado id={} code={} detail={}",
+                    "payload rejected id={} code={} detail={}",
                     task.id,
                     err.code,
                     db::sanitize_detail(&err.detail)
@@ -307,7 +307,7 @@ impl Worker {
                 store
                     .finalize_failed(&task.id, err.code, &err.detail)
                     .await?;
-                logging::debug(&format!("finalizado id={} FAILED {}", task.id, err.code));
+                logging::debug(&format!("finalized id={} FAILED {}", task.id, err.code));
                 logging::info(&format!("finalized id={} FAILED {}", task.id, err.code));
                 return Ok(Some(err.code.to_owned()));
             }
@@ -318,7 +318,7 @@ impl Worker {
         let files = match attachments::load(&config.attachment_roots, &content.attachment_paths) {
             Err(err) => {
                 logging::debug(&format!(
-                    "adjunto rechazado id={} code={} detail={}",
+                    "attachment rejected id={} code={} detail={}",
                     task.id,
                     err.code(),
                     db::sanitize_detail(err.detail())
@@ -345,10 +345,10 @@ impl Worker {
             (Some(_), Some(_)) => "alternative",
             (Some(_), None) => "plain",
             (None, Some(_)) => "html",
-            (None, None) => "sin-cuerpo",
+            (None, None) => "no-body",
         };
         logging::debug(&format!(
-            "mensaje id={} kind={kind} to={}",
+            "message id={} kind={kind} to={}",
             task.id, content.to
         ));
         // Without AUTH: connection parameters only, never secrets.
@@ -361,18 +361,18 @@ impl Worker {
                 .smtp_user
                 .as_deref()
                 .map(|_| "<redacted>")
-                .unwrap_or("(sin-auth)")
+                .unwrap_or("(no-auth)")
         ));
         let started = std::time::Instant::now();
         match mailer::send(config, &content, &files).await {
             Ok(()) => {
                 logging::debug(&format!(
-                    "envío id={} ok latency_ms={}",
+                    "sent id={} ok latency_ms={}",
                     task.id,
                     started.elapsed().as_millis()
                 ));
                 store.finalize_success(&task.id).await?;
-                logging::debug(&format!("finalizado id={} SUCCESSFUL", task.id));
+                logging::debug(&format!("finalized id={} SUCCESSFUL", task.id));
                 logging::info(&format!(
                     "finalized id={} SUCCESSFUL latency_ms={}",
                     task.id,
@@ -381,7 +381,7 @@ impl Worker {
             }
             Err(err) => {
                 logging::debug(&format!(
-                    "envío id={} error={} detail={} latency_ms={}",
+                    "sent id={} error={} detail={} latency_ms={}",
                     task.id,
                     err.code(),
                     db::sanitize_detail(err.detail()),
@@ -474,7 +474,7 @@ impl Worker {
             rss_kb: crate::proc::read_vmrss_kb(pid),
         });
         if let Err(err) = self.store.write_heartbeat(&meta).await {
-            logging::warn(&format!("heartbeat no escrito: {err}"));
+            logging::warn(&format!("heartbeat write failed: {err}"));
         }
     }
 
@@ -523,7 +523,7 @@ impl Worker {
         let scope = db::QueueScope::from(&config);
         let worker = Self::new(config, PostgresTaskStore::new(pool, scope, worker_id));
         logging::debug(&format!(
-            "alcance claim queue={} backend={} tasks={} worker_id={}",
+            "claim scope queue={} backend={} tasks={} worker_id={}",
             worker.config.queue_name,
             worker.config.backend_name,
             worker.config.task_paths.join(","),
@@ -585,7 +585,7 @@ impl Worker {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = shutdown_signal() => {
-                            logging::info("shutdown solicitado, saliendo");
+                            logging::info("shutdown requested, exiting");
                             break;
                         }
                     }
@@ -594,14 +594,14 @@ impl Worker {
                     db_failures = db_failures.saturating_add(1);
                     let delay = db_reconnect_delay(db_failures);
                     logging::warn(&format!(
-                        "db error (fallo consecutivo {db_failures}): {err}; reintentando en {}s",
+                        "db error (consecutive failure {db_failures}): {err}; retrying in {}s",
                         delay.as_secs()
                     ));
                     // Leave `empty` alone: it counts empty polls, not failures.
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
                         _ = shutdown_signal() => {
-                            logging::info("shutdown solicitado, saliendo");
+                            logging::info("shutdown requested, exiting");
                             break;
                         }
                     }

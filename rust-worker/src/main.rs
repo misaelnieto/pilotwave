@@ -2,7 +2,7 @@
 //!
 //! Thin bootstrap: parse the CLI, load config, dispatch without a DB (`log`,
 //! `stop`, the `--bg` parent) and delegate to `worker::Worker` for oneshots
-//! (`status`/`inspect`/`list`/single `run`) and loops (`--fg`/`--bg-child`).
+//! (`status`/`is-alive`/`inspect`/`list`/single `run`) and loops (`--fg`/`--bg-child`).
 //! `status` shows the daemon section even when the DB is down; `is-alive`
 //! prints its one-line probe (`fresh|stale|down|error`, exits 0/1/2) even
 //! with bad config or a dead DB, so a cron keep-alive stays machine-readable.
@@ -125,12 +125,12 @@ async fn run() -> worker::Result<ExitCode> {
         return match daemon::run_stop(&config) {
             Ok(daemon::StopOutcome::AlreadyStopped) => {
                 println!("{}", cli::render_stop_not_running());
-                logging::info("stop: daemon no corriendo (idempotente)");
+                logging::info("stop: daemon not running (idempotent)");
                 Ok(ExitCode::SUCCESS)
             }
             Ok(daemon::StopOutcome::Stopped { pid, forced }) => {
                 println!("{}", cli::render_stop_done(pid, forced));
-                logging::info(&format!("stop: daemon detenido pid={pid} forced={forced}"));
+                logging::info(&format!("stop: daemon stopped pid={pid} forced={forced}"));
                 Ok(ExitCode::SUCCESS)
             }
             Err(err) => {
@@ -185,17 +185,15 @@ async fn run() -> worker::Result<ExitCode> {
                 // Cron probe: DB unreachable is `error` (exit 2: alert,
                 // never blind-restart against a dead Postgres). The daemon
                 // was already resolved above without touching the DB.
-                eprintln!("error: base de datos no disponible: {err}");
+                eprintln!("error: database unavailable: {err}");
                 println!("{}", cli::render_is_alive_error("db_unavailable"));
                 return Ok(ExitCode::from(2));
             }
             if let Some(info) = &daemon_info {
                 // Only `status` reaches here with the daemon resolved.
                 println!("{}", cli::render_daemon_status(info));
-                eprintln!("error: base de datos no disponible: {err}");
-                return Err(worker::invalid_input(
-                    "base de datos no disponible".to_owned(),
-                ));
+                eprintln!("error: database unavailable: {err}");
+                return Err(worker::invalid_input("database unavailable".to_owned()));
             }
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
@@ -206,7 +204,7 @@ async fn run() -> worker::Result<ExitCode> {
     }
     // Least-privilege check (roadmap R-6): fail loud when the role lacks the
     // minimum `.env.example` GRANTs. Write paths only (`run`): `status` /
-    // `inspect` / `list` use the reader DSN and never write.
+    // `inspect` / `list` / `is-alive` use the reader DSN and never write.
     if matches!(&cli.command, cli::Command::Run(_))
         && let Err(err) = db::verify_least_privilege(&pool, config.skip_grant_check).await
     {
@@ -237,11 +235,11 @@ async fn run() -> worker::Result<ExitCode> {
         }
         // `stop` returns before connecting (never touches the DB): unreachable.
         cli::Command::Stop => {
-            unreachable!("stop se atiende antes de conectar a la BD")
+            unreachable!("stop is handled before connecting to the DB")
         }
         // `log` likewise (file tail, no DB): unreachable.
         cli::Command::Log(_) => {
-            unreachable!("log se atiende antes de conectar a la BD")
+            unreachable!("log is handled before connecting to the DB")
         }
         cli::Command::Run(args) => {
             worker.run_once(args.id.as_deref()).await?;

@@ -51,7 +51,7 @@ pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
 ///   SIGKILL phase waits 5 s more (see `STOP_*`).
 pub fn run_stop(config: &Config) -> Result<StopOutcome, Box<dyn std::error::Error>> {
     let Some(pid_path) = config.pid_file.as_ref() else {
-        let msg = "PILOTWAVE_PID_FILE no configurado: sin pidfile no hay daemon que detener";
+        let msg = "PILOTWAVE_PID_FILE not configured: without a pidfile there is no daemon to stop";
         return Err(
             Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))
                 as Box<dyn std::error::Error>,
@@ -266,11 +266,11 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), AcquireError> {
 fn open_failed(path: &Path, what: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind as Kind;
     let hint = match err.kind() {
-        Kind::NotFound => "ruta inexistente o symlink roto",
-        Kind::PermissionDenied => "sin permiso: revisa dueño y modo del archivo y sus directorios",
-        Kind::IsADirectory => "es un directorio, no un archivo",
-        Kind::AlreadyExists => "ya existe con otro tipo",
-        _ => "fallo de E/S",
+        Kind::NotFound => "missing path or broken symlink",
+        Kind::PermissionDenied => "permission denied: check file and directory owner and mode",
+        Kind::IsADirectory => "is a directory, not a file",
+        Kind::AlreadyExists => "already exists with another type",
+        _ => "I/O failure",
     };
     format!("{what} {}: {hint}: {err}", path.display())
 }
@@ -293,7 +293,7 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
         .map_err(|err| open_failed(path, "pid file (metadata)", &err))?;
     if !meta.file_type().is_file() {
         return Err(format!(
-            "pid file {}: no es un archivo regular",
+            "pid file {}: is not a regular file",
             path.display()
         ));
     }
@@ -302,7 +302,7 @@ pub fn ensure_pid_file_writable(path: &Path) -> Result<(), String> {
     if meta.permissions().mode() & 0o7777 & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
             format!(
-                "pid file {}: no se pudo endurecer a 0600: {err}",
+                "pid file {}: could not harden to 0600: {err}",
                 path.display()
             )
         })?;
@@ -407,13 +407,13 @@ pub fn stop_daemon(
         }
         Err(errno) if errno == libc::EPERM => {
             return Err(format!(
-                "no se pudo detener pid={pid} (pid file {}): sin permiso (EPERM): revisa que el daemon corra con tu usuario",
+                "could not stop pid={pid} (pid file {}): permission denied (EPERM): check that the daemon runs as your user",
                 path.display()
             ));
         }
         Err(errno) => {
             return Err(format!(
-                "no se pudo enviar SIGTERM a pid={pid} (pid file {}): kill devolvió errno {errno}",
+                "could not send SIGTERM to pid={pid} (pid file {}): kill returned errno {errno}",
                 path.display()
             ));
         }
@@ -432,13 +432,13 @@ pub fn stop_daemon(
         }
         Err(errno) if errno == libc::EPERM => {
             return Err(format!(
-                "no se pudo forzar pid={pid} (pid file {}): sin permiso (EPERM): revisa que el daemon corra con tu usuario",
+                "could not force pid={pid} (pid file {}): permission denied (EPERM): check that the daemon runs as your user",
                 path.display()
             ));
         }
         Err(errno) => {
             return Err(format!(
-                "no se pudo enviar SIGKILL a pid={pid} (pid file {}): kill devolvió errno {errno}",
+                "could not send SIGKILL to pid={pid} (pid file {}): kill returned errno {errno}",
                 path.display()
             ));
         }
@@ -447,7 +447,7 @@ pub fn stop_daemon(
         return Ok(StopOutcome::Stopped { pid, forced: true });
     }
     Err(format!(
-        "daemon pid={pid} sigue vivo tras SIGTERM+SIGKILL (pid file {}): no responde; revísalo manualmente",
+        "daemon pid={pid} still alive after SIGTERM+SIGKILL (pid file {}): not responding; check it manually",
         path.display()
     ))
 }

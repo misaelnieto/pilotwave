@@ -39,10 +39,10 @@ pub struct ListQuery {
 impl ListQuery {
     pub fn new(status: TaskStatus, limit: i64, offset: i64) -> Result<Self, String> {
         if !(1..=200).contains(&limit) {
-            return Err(format!("--limit debe estar entre 1 y 200, got {limit}"));
+            return Err(format!("--limit must be between 1 and 200, got {limit}"));
         }
         if offset < 0 {
-            return Err(format!("--offset debe ser >= 0, got {offset}"));
+            return Err(format!("--offset must be >= 0, got {offset}"));
         }
         Ok(Self {
             status,

@@ -32,19 +32,19 @@ pub fn freshness(age_secs: i64) -> &'static str {
     }
 }
 
-/// Contadores e identidad operativa para una escritura de heartbeat.
-/// Todo sale de la BD (conteos) o de `/proc` propio (best-effort);
-/// no field carries PII.
+/// Counters and operational identity for one heartbeat write.
+/// Everything comes from the DB (counts) or from our own `/proc`
+/// (best-effort); no field carries PII.
 pub struct BeatCounters {
     /// Claimable `COUNT READY` seen in this cycle (`due_depth`).
     pub queue_depth_seen: i64,
-    /// Tareas procesadas desde el arranque del proceso.
+    /// Tasks processed since process start.
     pub tasks_processed: u64,
     /// UUID of the last touched task (the id only, never the content).
     pub last_task_id: Option<String>,
     /// Last `pilotwave_worker.*` (code only, never attacker-text detail).
     pub last_error_code: Option<String>,
-    /// PID propio (cruce con la sonda local de `status`).
+    /// Own PID (cross-check with the `status` local probe).
     pub pid: u32,
     /// Best-effort (`None` => `null`, el lector pinta `n/a`).
     pub uptime_secs: Option<u64>,

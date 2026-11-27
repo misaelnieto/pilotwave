@@ -9,21 +9,21 @@ date: 2026-11-26
 
 ## Context
 
-Production runs on OpalStack: no systemd, no root, so process
-supervision is cron + recipes. Agreed design (aiph-crm integration):
-keep-alive every 5 min, single instance via the `--bg` PID lock,
+One use case for Pilotwave is to be able to run on shared hosting
+environments which usually offer a regular user account with no
+systemd and no root and are mostly isolated from other users, so process
+supervision is cron + scripts that need a way to query the running
+status of the pilotwave daemon. The current `status` command
+prints a human table, so a cron script would either parse fragile
+prose or require `jq` for JSON — not guaranteed on minimal hosts.
+What is missing is a machine-readable liveness signal.
+
+Assumptions: keep-alive every 5 min, single instance via the `--bg` PID lock,
 restart threshold ~360 s (one full interval + margin), alert threshold
 90-120 s. The building blocks already exist: `daemon::check()`
 (lock + `kill -0` + cmdline identity, never stale), idempotent
 `run --bg` (already-running is a no-op exit 0), and heartbeat
 freshness codified in `heartbeat.rs` (90 s).
-
-What is missing is a machine-readable liveness signal. `status`
-prints a human table, so a cron script would either parse fragile
-prose or require `jq` for JSON — not guaranteed on minimal hosts.
-Measured cost of flag (`status --is-alive`) vs subcommand
-(`is-alive`): equal within ~10 lines on ~1300; they differ only in
-blast radius and call-site readability.
 
 ## Decision
 
@@ -71,9 +71,9 @@ Contract:
 
 ## Consequences
 
-- aiph-crm keep-alive becomes a one-liner
-  (`flock -n <lock> is-alive --max-age-secs 360 || run --bg`);
-  thresholds stay in `tasks.just`/`crontab.txt`, where policy
+- Client keep-alive scripts become a one-liner
+  (`pilotwave-worker is-alive --max-age-secs 360 || run --bg`);
+  thresholds stay in client scripts, where policy
   belongs.
 - New surface: clap help entry, unit + CLI tests, and mandatory
   docs (integration docs, `README.md`) plus a `CHANGELOG.md`

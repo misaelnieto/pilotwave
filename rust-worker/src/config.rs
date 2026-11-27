@@ -89,7 +89,7 @@ impl Env {
 pub struct Config {
     /// Least-privilege DSN (`aiph_worker` role), never the app's `DATABASE_URL`.
     pub database_url: String,
-    /// Read-only DSN for the CLI (`status`/`list`/`inspect`, see roadmap R-7).
+    /// Read-only DSN for the CLI (`status`/`list`/`inspect`/`is-alive`, see roadmap R-7).
     /// `PILOTWAVE_DATABASE_URL_RO`; absent/empty falls back to `database_url`.
     pub database_url_ro: Option<String>,
     /// Value appended to `worker_ids` on every claim; `[A-Za-z0-9_-]{1,64}`.
@@ -164,7 +164,7 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// DSN for the read-only subcommands (`status`/`list`/`inspect`,
+    /// DSN for the read-only subcommands (`status`/`list`/`inspect`/`is-alive`,
     /// roadmap R-7): the reader role when configured, else the worker DSN.
     pub fn read_database_url(&self) -> &str {
         self.database_url_ro
@@ -436,7 +436,7 @@ fn smtp_user_display(user: &Option<String>) -> &'static str {
     if user.is_some() {
         "<redacted>"
     } else {
-        "(sin-auth)"
+        "(no-auth)"
     }
 }
 
@@ -927,7 +927,7 @@ mod tests {
             })
             .unwrap()
         );
-        assert!(shown.contains("(sin-auth)"));
+        assert!(shown.contains("(no-auth)"));
         assert!(!shown.contains("secret"));
     }
 

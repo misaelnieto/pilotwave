@@ -22,7 +22,8 @@ external services. Only the dependencies already in `pyproject.toml`
 
 No attachments — the example stays minimal on purpose. For attachment
 roots (`PILOTWAVE_ATTACHMENT_ROOTS`, explicit, no `MEDIA_ROOT` fallback —
-P-3), see `docs/05-DEVELOPERS/getting-started.md`.
+P-3), see
+[02-CONFIGURATION.md](../docs/07-USER-GUIDE/02-CONFIGURATION.md#attachments).
 
 ## Run it
 
