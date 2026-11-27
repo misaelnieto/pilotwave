@@ -35,6 +35,12 @@ pub fn invalid_input(msg: String) -> Box<dyn std::error::Error> {
 /// Combined with `PILOTWAVE_RECYCLE_N` (by tasks); whichever hits first wins.
 const RECYCLE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Bounded wait for the `is-alive` heartbeat `SELECT`: postgres may accept
+/// the connection and then stall the query/response, and `db::connect` only
+/// bounds acquisition. Without this the cron probe hangs without its
+/// promised one-line result.
+const IS_ALIVE_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How the persistent loop ended: clean shutdown (exit 0) or
 /// self-recycle (exit 75, the keep-alive restarts without alerting).
 pub enum LoopEnd {
@@ -208,14 +214,28 @@ impl Worker {
                 return Ok(ExitCode::from(2));
             }
         }
-        let heartbeat = match self.store.read_heartbeat().await {
-            Ok(heartbeat) => heartbeat,
-            Err(err) => {
+        let heartbeat = match tokio::time::timeout(
+            IS_ALIVE_HEARTBEAT_TIMEOUT,
+            self.store.read_heartbeat(),
+        )
+        .await
+        {
+            Err(_) => {
+                // stderr, never stdout: the probe line stays machine-readable.
+                eprintln!(
+                    "WARNING pilotwave-worker: is-alive: heartbeat timed out after {}s",
+                    IS_ALIVE_HEARTBEAT_TIMEOUT.as_secs()
+                );
+                println!("{}", cli::render_is_alive_error("heartbeat_read_timeout"));
+                return Ok(ExitCode::from(2));
+            }
+            Ok(Err(err)) => {
                 // stderr, never stdout: the probe line stays machine-readable.
                 eprintln!("WARNING pilotwave-worker: is-alive: heartbeat unreadable: {err}");
                 println!("{}", cli::render_is_alive_error("heartbeat_read_failed"));
                 return Ok(ExitCode::from(2));
             }
+            Ok(Ok(heartbeat)) => heartbeat,
         };
         let Some(hb) = heartbeat else {
             println!("{}", cli::render_is_alive_down("no_heartbeat"));
