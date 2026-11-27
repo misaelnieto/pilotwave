@@ -242,8 +242,13 @@ async fn run() -> worker::Result<ExitCode> {
         }
         cli::Command::IsAlive(args) => {
             // Explicit codes, never `?` (`main` maps `Err` to 1):
-            // fresh => 0, stale/down => 1, error => 2.
-            return worker.run_is_alive(args.max_age_secs).await;
+            // fresh => 0, stale/down => 1, error => 2. The local daemon
+            // gates `fresh`: a fresh shared heartbeat from another host
+            // (or left by a recently stopped local daemon) must not mask
+            // a stopped local daemon, or cron would skip the restart.
+            return worker
+                .run_is_alive(daemon_info.as_ref(), args.max_age_secs)
+                .await;
         }
         cli::Command::Inspect(args) => {
             worker.run_inspect(&args.id, args.show_pii).await?;

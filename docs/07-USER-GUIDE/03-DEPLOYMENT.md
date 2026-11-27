@@ -126,10 +126,12 @@ If cron is all you have, `is-alive` is the probe and cron is the
 supervisor. It prints exactly one machine-readable line on stdout:
 
 ```text
-fresh age_secs=3 pid=1234     # exit 0: nothing to do
-stale age_secs=400 pid=1234   # exit 1: restart with run --bg
-down reason=no_heartbeat      # exit 1: restart with run --bg
-error reason=db_unavailable   # exit 2: alert, never restart
+fresh age_secs=3 pid=1234        # exit 0: local daemon running + fresh heartbeat
+stale age_secs=400 pid=1234      # exit 1: local daemon running but heartbeat old
+down reason=daemon_not_running   # exit 1: local daemon stopped (restart with run --bg)
+down reason=no_heartbeat         # exit 1: no heartbeat row yet (restart with run --bg)
+error reason=daemon_not_configured # exit 2: no PID file configured (needs human)
+error reason=db_unavailable      # exit 2: alert, never restart
 ```
 
 `run --bg` is idempotent: if a worker is already running it is a

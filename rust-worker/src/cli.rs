@@ -54,6 +54,10 @@ pub enum Command {
     /// alert, never blind-restart). Read-only: uses the reader DSN when
     /// configured, never writes, never signals or starts anything.
     /// Diagnostics stay on stderr so command substitution never breaks.
+    /// `fresh` requires BOTH the local `--bg` daemon (PID-file lock +
+    /// identity) AND a fresh shared heartbeat: a fresh heartbeat from
+    /// another host (or left by a recently stopped local daemon) never
+    /// masks a stopped local daemon (`down reason=daemon_not_running`).
     IsAlive(IsAliveArgs),
     /// Claim and finalize: one task (`--id`), one generic task, or loop (`--fg`).
     Run(RunArgs),

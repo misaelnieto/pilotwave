@@ -179,11 +179,35 @@ impl Worker {
     /// anything. Always returns `Ok` with the explicit code: 0 fresh,
     /// 1 stale/down (restartable), 2 error (alert, never blind-restart) --
     /// `main()` maps `Err` to 1, so no `?` may escape from here.
-    pub async fn run_is_alive(&self, max_age_secs: u64) -> Result<ExitCode> {
+    ///
+    /// Local liveness requires the local daemon: a fresh shared heartbeat
+    /// (possibly from another host, or left by a recently stopped local
+    /// daemon) must not report the local daemon as alive. `daemon` is the
+    /// already-resolved local probe (`main.rs` resolves it before touching
+    /// the DB): `NotRunning` => `down` (exit 1, cron restarts),
+    /// `NotConfigured` => `error` (exit 2, needs human), only `Running`
+    /// proceeds to the heartbeat age check. `None` keeps the legacy
+    /// heartbeat-only check (callers without a local probe).
+    pub async fn run_is_alive(
+        &self,
+        daemon: Option<&DaemonInfo>,
+        max_age_secs: u64,
+    ) -> Result<ExitCode> {
         let Ok(max_age) = cli::validate_max_age_secs(max_age_secs) else {
             println!("{}", cli::render_is_alive_error("invalid_max_age_secs"));
             return Ok(ExitCode::from(2));
         };
+        match daemon {
+            Some(DaemonInfo::Running { .. }) | None => {}
+            Some(DaemonInfo::NotRunning) => {
+                println!("{}", cli::render_is_alive_down("daemon_not_running"));
+                return Ok(ExitCode::from(1));
+            }
+            Some(DaemonInfo::NotConfigured) => {
+                println!("{}", cli::render_is_alive_error("daemon_not_configured"));
+                return Ok(ExitCode::from(2));
+            }
+        }
         let heartbeat = match self.store.read_heartbeat().await {
             Ok(heartbeat) => heartbeat,
             Err(err) => {
