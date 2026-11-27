@@ -2,6 +2,51 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-11-27)
+
+### Bug Fixes
+
+- Avoid i64 wraparound in is-alive max-age comparison
+  ([`e25558c`](https://github.com/misaelnieto/pilotwave/commit/e25558c3814ba46caca67f98e4c39eb47509b46f))
+
+- Bound is-alive heartbeat read with timeout (error, exit 2 on stall)
+  ([`1d50b72`](https://github.com/misaelnieto/pilotwave/commit/1d50b724fb5b3258726fb37683aae4dfbfb03f46))
+
+- Enforce TLS on reader DSN before connect
+  ([`ade7869`](https://github.com/misaelnieto/pilotwave/commit/ade786969f48e904d1e63eaf45cd5e1ddd49b50e))
+
+- Grant pilotwave_worker SELECT on heartbeat for is-alive fallback
+  ([`190f167`](https://github.com/misaelnieto/pilotwave/commit/190f167235f39b1cd02bc9899fe1922dbfcb35c0))
+
+- Is-alive verifies local daemon before trusting shared heartbeat
+  ([`9d1b6e2`](https://github.com/misaelnieto/pilotwave/commit/9d1b6e2f2cffe21d6cae2bc8af1afde8f3c3d38f))
+
+- Serialize concurrent run --bg starts, hold cron lock across probe+restart
+  ([`78499a9`](https://github.com/misaelnieto/pilotwave/commit/78499a909a005f16874a30697c34ac5873ffb394))
+
+- **is-alive**: Emit machine-readable error for malformed --max-age-secs
+  ([`a525e34`](https://github.com/misaelnieto/pilotwave/commit/a525e34eb4baf2f4b732b8cbdfc756ade9f2fd22))
+
+- **is-alive**: Probe on reader DSN only, without worker/SMTP config
+  ([`e9782b0`](https://github.com/misaelnieto/pilotwave/commit/e9782b02ba5e693d51fba3826002dc8abeea4703))
+
+### Documentation
+
+- Export sourced worker.env in cron keep-alive one-liner
+  ([`25adbdc`](https://github.com/misaelnieto/pilotwave/commit/25adbdc2370c1689ad975e6aaccaf4df1d469d5e))
+
+- **config**: Document PILOTWAVE_SKIP_GRANT_CHECK default and prod warning
+  ([`748a9a6`](https://github.com/misaelnieto/pilotwave/commit/748a9a6d03b8affd0727de8479820abd550f3555))
+
+### Features
+
+- Is-alive liveness subcommand for cron keep-alive
+  ([`f35ac63`](https://github.com/misaelnieto/pilotwave/commit/f35ac6359edd1e12364bcc57ab8c863be5984ece))
+
+- User guide + English CLI (is-alive docs reorg)
+  ([`067e2e3`](https://github.com/misaelnieto/pilotwave/commit/067e2e36376604747bdf1bd77a8d29200abd0537))
+
+
 ## Unreleased
 
 ### Features
