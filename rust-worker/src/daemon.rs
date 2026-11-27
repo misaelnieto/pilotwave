@@ -25,9 +25,15 @@ use crate::config::Config;
 /// `paths()`); with a pidfile, probe the lock + identity and resolve
 /// uptime/rss best-effort (`None` = unreadable `/proc` => `n/a`).
 pub fn describe(config: &Config) -> crate::cli::DaemonInfo {
-    match config.pid_file.as_ref() {
+    describe_pid_file(config.pid_file.as_ref())
+}
+
+/// Same as [`describe`] but for callers without a full [`Config`]
+/// (`is-alive` runs on the reader DSN only and never builds one).
+pub fn describe_pid_file(pid_file: Option<&PathBuf>) -> crate::cli::DaemonInfo {
+    match pid_file {
         None => crate::cli::DaemonInfo::NotConfigured,
-        // Note: `config.pid_file` directly, NOT `paths()`
+        // Note: `pid_file` directly, NOT `paths()`
         // (that one also requires the log; here only the pidfile matters).
         Some(pid_path) => match check(pid_path) {
             LockState::Free => crate::cli::DaemonInfo::NotRunning,

@@ -40,11 +40,11 @@ async fn run() -> worker::Result<ExitCode> {
     let cli = cli::Cli::parse();
     logging::set_verbose(cli.verbose);
 
-    // Parse `.env` without exporting it (see `config::Env`), then build the
-    // typed config. Real env vars win over the file. `is-alive` is a cron
-    // probe: even bad config reports as its one-line `error` (exit 2)
-    // instead of the generic `fatal` (exit 1), so the line stays
-    // machine-readable; the detail goes to stderr.
+    // Parse `.env` without exporting it (see `config::Env`). Real env vars
+    // win over the file. `is-alive` is a cron probe on the reader DSN only
+    // (see `run_is_alive_probe`): even bad config reports as its one-line
+    // `error` (exit 2) instead of the generic `fatal` (exit 1), so the line
+    // stays machine-readable; the detail goes to stderr.
     let is_alive = matches!(cli.command, cli::Command::IsAlive(_));
     // Threshold parsing runs before config/DB so a malformed
     // `--max-age-secs` always reports `invalid_max_age_secs` (exit 2)
@@ -68,6 +68,13 @@ async fn run() -> worker::Result<ExitCode> {
         Ok(env) => env,
         Err(msg) => return bad_config(msg),
     };
+    // `is-alive` is a read-only cron probe: it runs on the reader DSN only
+    // (roadmap R-7) and must not require worker/SMTP settings
+    // (`PILOTWAVE_DATABASE_URL`, `EMAIL_*`, `DEFAULT_FROM_EMAIL`, …).
+    // Load just the reader DSN + pidfile, then probe without a full `Config`.
+    if let cli::Command::IsAlive(args) = &cli.command {
+        return run_is_alive_probe(&env, args).await;
+    }
     let config = match config::Config::from_env(&env) {
         Ok(config) => config,
         Err(msg) => return bad_config(msg),
@@ -166,22 +173,19 @@ async fn run() -> worker::Result<ExitCode> {
     // One-shot: single attempt, fail loud (`?` -> exit 1).
     // `status` resolves the daemon BEFORE touching the DB: the daemon section
     // prints even when Postgres is down (DB down => daemon on stdout +
-    // detail on stderr + exit 1). `is-alive` resolves it the same way so
-    // `down`/`error` still print when Postgres is down (read-only probe:
-    // never writes, never signals). Without `PILOTWAVE_PID_FILE` there is no
+    // detail on stderr + exit 1). Without `PILOTWAVE_PID_FILE` there is no
     // crash: the section reports "not configured".
-    let daemon_info = if matches!(cli.command, cli::Command::Status | cli::Command::IsAlive(_)) {
+    let daemon_info = if matches!(cli.command, cli::Command::Status) {
         Some(daemon::describe(&config))
     } else {
         None
     };
     // Read-only subcommands use the reader DSN when configured (roadmap R-7).
+    // (`is-alive` never reaches here: it probes via `run_is_alive_probe`
+    // on the reader DSN without a full `Config`.)
     let read_only = matches!(
         &cli.command,
-        cli::Command::Status
-            | cli::Command::IsAlive(_)
-            | cli::Command::Inspect(_)
-            | cli::Command::List(_)
+        cli::Command::Status | cli::Command::Inspect(_) | cli::Command::List(_)
     );
     let dsn = if read_only {
         config.read_database_url()
@@ -203,24 +207,11 @@ async fn run() -> worker::Result<ExitCode> {
             "{var_name} must include sslmode=require outside localhost \
              (A02: credentials would travel in cleartext)"
         );
-        if is_alive {
-            eprintln!("error: {msg}");
-            println!("{}", cli::render_is_alive_error("bad_config"));
-            return Ok(ExitCode::from(2));
-        }
         return Err(worker::invalid_input(msg));
     }
     let pool = match db::connect(dsn).await {
         Ok(pool) => pool,
         Err(err) => {
-            if matches!(cli.command, cli::Command::IsAlive(_)) {
-                // Cron probe: DB unreachable is `error` (exit 2: alert,
-                // never blind-restart against a dead Postgres). The daemon
-                // was already resolved above without touching the DB.
-                eprintln!("error: database unavailable: {err}");
-                println!("{}", cli::render_is_alive_error("db_unavailable"));
-                return Ok(ExitCode::from(2));
-            }
             if let Some(info) = &daemon_info {
                 // Only `status` reaches here with the daemon resolved.
                 println!("{}", cli::render_daemon_status(info));
@@ -230,13 +221,10 @@ async fn run() -> worker::Result<ExitCode> {
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
     };
-    // `is-alive` stays silent on stdout (single probe line only).
-    if !is_alive {
-        logging::info("postgres connected (max_connections=1)");
-    }
+    logging::info("postgres connected (max_connections=1)");
     // Least-privilege check (roadmap R-6): fail loud when the role lacks the
     // minimum `.env.example` GRANTs. Write paths only (`run`): `status` /
-    // `inspect` / `list` / `is-alive` use the reader DSN and never write.
+    // `inspect` / `list` use the reader DSN and never write.
     if matches!(&cli.command, cli::Command::Run(_))
         && let Err(err) = db::verify_least_privilege(&pool, config.skip_grant_check).await
     {
@@ -250,15 +238,8 @@ async fn run() -> worker::Result<ExitCode> {
         cli::Command::Status => {
             worker.run_status(daemon_info.as_ref()).await?;
         }
-        cli::Command::IsAlive(args) => {
-            // Explicit codes, never `?` (`main` maps `Err` to 1):
-            // fresh => 0, stale/down => 1, error => 2. The local daemon
-            // gates `fresh`: a fresh shared heartbeat from another host
-            // (or left by a recently stopped local daemon) must not mask
-            // a stopped local daemon, or cron would skip the restart.
-            return worker
-                .run_is_alive(daemon_info.as_ref(), &args.max_age_secs)
-                .await;
+        cli::Command::IsAlive(_) => {
+            unreachable!("is-alive is served by run_is_alive_probe before connecting")
         }
         cli::Command::Inspect(args) => {
             worker.run_inspect(&args.id, args.show_pii).await?;
@@ -284,4 +265,61 @@ async fn run() -> worker::Result<ExitCode> {
     }
     // The pool drops here (no explicit close).
     Ok(ExitCode::SUCCESS)
+}
+
+/// `is-alive` cron probe on the reader DSN only (no full `Config`).
+///
+/// Loads just `PILOTWAVE_DATABASE_URL_RO` (fallback: worker DSN) plus the
+/// pidfile, resolves the local daemon without touching the DB, then runs
+/// the shared heartbeat check. Never writes, never signals, never starts
+/// anything. Explicit codes, never `?` (`main` maps `Err` to 1):
+/// fresh => 0, stale/down => 1, error => 2. Stdout carries only the probe
+/// line; diagnostics go to stderr.
+async fn run_is_alive_probe(
+    env: &config::Env,
+    args: &cli::IsAliveArgs,
+) -> worker::Result<ExitCode> {
+    let probe = match config::IsAliveConfig::from_env(env) {
+        Ok(probe) => probe,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            println!("{}", cli::render_is_alive_error("bad_config"));
+            return Ok(ExitCode::from(2));
+        }
+    };
+    // The local daemon gates `fresh`: a fresh shared heartbeat from another
+    // host (or left by a recently stopped local daemon) must not mask a
+    // stopped local daemon, or cron would skip the restart.
+    let daemon_info = daemon::describe_pid_file(probe.pid_file.as_ref());
+    // Defense in depth: the DSN must require TLS outside loopback before
+    // any credential or heartbeat traffic leaves the process.
+    // `IsAliveConfig::from_env` already rejects it; re-check the exact
+    // string `db::connect` is about to open (A02).
+    let dsn = probe.database_url.as_str();
+    if !config::dsn_requires_ssl(dsn) && !config::dsn_host_is_loopback(dsn) {
+        eprintln!(
+            "error: {} must include sslmode=require outside localhost \
+             (A02: credentials would travel in cleartext)",
+            probe.database_url_var
+        );
+        println!("{}", cli::render_is_alive_error("bad_config"));
+        return Ok(ExitCode::from(2));
+    }
+    let pool = match db::connect(dsn).await {
+        Ok(pool) => pool,
+        Err(err) => {
+            // DB unreachable is `error` (exit 2: alert, never blind-restart
+            // against a dead Postgres). The daemon was already resolved
+            // above without touching the DB.
+            eprintln!("error: database unavailable: {err}");
+            println!("{}", cli::render_is_alive_error("db_unavailable"));
+            return Ok(ExitCode::from(2));
+        }
+    };
+    // The heartbeat `SELECT` ignores queue scope: the probe only needs a
+    // store to read it. Dummy scope/worker id, never used for writes.
+    let scope = db::QueueScope::new(String::new(), String::new(), Vec::new());
+    let store = db::PostgresTaskStore::new(pool, scope, "is-alive".to_owned());
+    // Explicit codes, never `?` (`main` maps `Err` to 1).
+    worker::Worker::probe_is_alive(&store, Some(&daemon_info), &args.max_age_secs).await
 }

@@ -180,9 +180,10 @@ impl Worker {
 
     /// `is-alive`: one machine-readable liveness line on stdout (ADR-004).
     ///
-    /// Read-only: a single heartbeat `SELECT` through the reader DSN (the
-    /// caller picks the pool). Never writes, never signals, never starts
-    /// anything. Always returns `Ok` with the explicit code: 0 fresh,
+    /// Read-only probe over an already-connected store (no `Config` needed):
+    /// a single heartbeat `SELECT` through the reader DSN (the caller picks
+    /// the pool). Never writes, never signals, never starts anything.
+    /// Always returns `Ok` with the explicit code: 0 fresh,
     /// 1 stale/down (restartable), 2 error (alert, never blind-restart) --
     /// `main()` maps `Err` to 1, so no `?` may escape from here.
     ///
@@ -194,8 +195,8 @@ impl Worker {
     /// `NotConfigured` => `error` (exit 2, needs human), only `Running`
     /// proceeds to the heartbeat age check. `None` keeps the legacy
     /// heartbeat-only check (callers without a local probe).
-    pub async fn run_is_alive(
-        &self,
+    pub async fn probe_is_alive(
+        store: &PostgresTaskStore,
         daemon: Option<&DaemonInfo>,
         max_age_secs: &str,
     ) -> Result<ExitCode> {
@@ -215,9 +216,7 @@ impl Worker {
             }
         }
         let heartbeat =
-            match tokio::time::timeout(IS_ALIVE_HEARTBEAT_TIMEOUT, self.store.read_heartbeat())
-                .await
-            {
+            match tokio::time::timeout(IS_ALIVE_HEARTBEAT_TIMEOUT, store.read_heartbeat()).await {
                 Err(_) => {
                     // stderr, never stdout: the probe line stays machine-readable.
                     eprintln!(

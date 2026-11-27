@@ -171,7 +171,6 @@ impl Config {
             .as_deref()
             .unwrap_or(&self.database_url)
     }
-
     pub fn from_env(env: &Env) -> Result<Self, String> {
         let database_url = env.required("PILOTWAVE_DATABASE_URL")?;
         // Optional: empty or absent => `None` (the CLI reuses `database_url`).
@@ -369,6 +368,62 @@ impl Config {
             skip_grant_check,
             pid_file,
             log_file,
+        })
+    }
+}
+
+/// Minimal config for the `is-alive` cron probe.
+///
+/// Only the reader DSN and the daemon pidfile: the probe never sends mail,
+/// claims tasks or writes, so worker/SMTP settings (`EMAIL_*`,
+/// `DEFAULT_FROM_EMAIL`, queue/scope, …) must not be required. With only
+/// `PILOTWAVE_DATABASE_URL_RO` set the probe still runs; without it the
+/// worker DSN is the fallback (same preference as
+/// [`Config::read_database_url`]).
+pub struct IsAliveConfig {
+    /// The DSN the probe actually opens (reader preferred, worker fallback).
+    pub database_url: String,
+    /// Which var `database_url` came from (for TLS diagnostics).
+    pub database_url_var: &'static str,
+    /// PID file of the `--bg` daemon (local liveness gate, optional).
+    pub pid_file: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for IsAliveConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsAliveConfig")
+            .field("database_url", &"<redacted>")
+            .field("database_url_var", &self.database_url_var)
+            .field("pid_file", &self.pid_file)
+            .finish()
+    }
+}
+
+impl IsAliveConfig {
+    pub fn from_env(env: &Env) -> Result<Self, String> {
+        let reader = env
+            .get("PILOTWAVE_DATABASE_URL_RO")
+            .filter(|v| !v.trim().is_empty());
+        let (database_url, database_url_var) = match reader {
+            Some(ro) => (ro, "PILOTWAVE_DATABASE_URL_RO"),
+            None => match env
+                .get("PILOTWAVE_DATABASE_URL")
+                .filter(|v| !v.trim().is_empty())
+            {
+                Some(rw) => (rw, "PILOTWAVE_DATABASE_URL"),
+                None => {
+                    return Err("missing required env var PILOTWAVE_DATABASE_URL_RO \
+                         (or PILOTWAVE_DATABASE_URL as fallback)"
+                        .into());
+                }
+            },
+        };
+        ensure_dsn_tls(&database_url, database_url_var)?;
+        let pid_file = optional_absolute(env, "PILOTWAVE_PID_FILE")?;
+        Ok(Self {
+            database_url,
+            database_url_var,
+            pid_file,
         })
     }
 }
@@ -980,5 +1035,103 @@ mod tests {
                 .skip_grant_check
         );
         assert!(config_with(&[("PILOTWAVE_SKIP_GRANT_CHECK", "quizas")]).is_err());
+    }
+
+    /// Minimal in-memory `Env` for the `is-alive` probe (never reads the
+    /// real process environment).
+    fn probe_env(extra: &[(&str, &str)]) -> Env {
+        let values = extra
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        Env {
+            values,
+            read_process_env: false,
+        }
+    }
+
+    #[test]
+    fn is_alive_solo_con_reader_sin_worker_ni_smtp() {
+        // Cron with only the reader DSN + pidfile: no worker DSN, no
+        // SMTP, no FROM. The supposedly read-only probe must still load.
+        let probe = IsAliveConfig::from_env(&probe_env(&[
+            (
+                "PILOTWAVE_DATABASE_URL_RO",
+                "postgres://reader:lector@127.0.0.1/db",
+            ),
+            ("PILOTWAVE_PID_FILE", "/run/pilotwave-worker.pid"),
+        ]))
+        .unwrap();
+        assert_eq!(probe.database_url, "postgres://reader:lector@127.0.0.1/db");
+        assert_eq!(probe.database_url_var, "PILOTWAVE_DATABASE_URL_RO");
+        assert_eq!(
+            probe.pid_file,
+            Some(PathBuf::from("/run/pilotwave-worker.pid"))
+        );
+    }
+
+    #[test]
+    fn is_alive_prefiere_reader_y_acepta_solo_worker() {
+        // Both set: the reader wins.
+        let probe = IsAliveConfig::from_env(&probe_env(&[
+            ("PILOTWAVE_DATABASE_URL", "postgres://u:p@127.0.0.1/db"),
+            (
+                "PILOTWAVE_DATABASE_URL_RO",
+                "postgres://reader:lector@127.0.0.1/db",
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(probe.database_url, "postgres://reader:lector@127.0.0.1/db");
+        assert_eq!(probe.database_url_var, "PILOTWAVE_DATABASE_URL_RO");
+        // Worker-only deployments keep working (fallback).
+        let probe = IsAliveConfig::from_env(&probe_env(&[(
+            "PILOTWAVE_DATABASE_URL",
+            "postgres://u:p@127.0.0.1/db",
+        )]))
+        .unwrap();
+        assert_eq!(probe.database_url, "postgres://u:p@127.0.0.1/db");
+        assert_eq!(probe.database_url_var, "PILOTWAVE_DATABASE_URL");
+        assert_eq!(probe.pid_file, None);
+    }
+
+    #[test]
+    fn is_alive_sin_dsn_falla_y_remoto_exige_ssl() {
+        // Neither DSN: loud failure (no SMTP confusion: the message names
+        // the DSN vars).
+        let err = IsAliveConfig::from_env(&probe_env(&[])).expect_err("sin DSN");
+        assert!(err.contains("PILOTWAVE_DATABASE_URL_RO"));
+        // Blank RO falls back to the worker DSN.
+        let probe = IsAliveConfig::from_env(&probe_env(&[
+            ("PILOTWAVE_DATABASE_URL_RO", "   "),
+            ("PILOTWAVE_DATABASE_URL", "postgres://u:p@127.0.0.1/db"),
+        ]))
+        .unwrap();
+        assert_eq!(probe.database_url_var, "PILOTWAVE_DATABASE_URL");
+        // Remote reader without sslmode: loud failure (A02).
+        assert!(
+            IsAliveConfig::from_env(&probe_env(&[(
+                "PILOTWAVE_DATABASE_URL_RO",
+                "postgres://reader:lector@db.example.com/db"
+            )]))
+            .is_err()
+        );
+        assert!(
+            IsAliveConfig::from_env(&probe_env(&[(
+                "PILOTWAVE_DATABASE_URL_RO",
+                "postgres://reader:lector@db.example.com/db?sslmode=require"
+            )]))
+            .is_ok()
+        );
+        // Relative pidfile: loud failure (fail-closed, like the full config).
+        assert!(
+            IsAliveConfig::from_env(&probe_env(&[
+                (
+                    "PILOTWAVE_DATABASE_URL_RO",
+                    "postgres://reader:lector@127.0.0.1/db"
+                ),
+                ("PILOTWAVE_PID_FILE", "relativa.pid"),
+            ]))
+            .is_err()
+        );
     }
 }
