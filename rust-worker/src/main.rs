@@ -178,6 +178,28 @@ async fn run() -> worker::Result<ExitCode> {
     } else {
         &config.database_url
     };
+    // Defense in depth: the selected DSN must require TLS outside
+    // loopback before any credential or heartbeat traffic leaves the
+    // process. `Config::from_env` already rejects a remote reader DSN
+    // without `sslmode=require`; re-check the exact string `db::connect`
+    // is about to open so a future caller cannot bypass it (A02).
+    if !config::dsn_requires_ssl(dsn) && !config::dsn_host_is_loopback(dsn) {
+        let var_name = if read_only && config.database_url_ro.is_some() {
+            "PILOTWAVE_DATABASE_URL_RO"
+        } else {
+            "PILOTWAVE_DATABASE_URL"
+        };
+        let msg = format!(
+            "{var_name} must include sslmode=require outside localhost \
+             (A02: credentials would travel in cleartext)"
+        );
+        if is_alive {
+            eprintln!("error: {msg}");
+            println!("{}", cli::render_is_alive_error("bad_config"));
+            return Ok(ExitCode::from(2));
+        }
+        return Err(worker::invalid_input(msg));
+    }
     let pool = match db::connect(dsn).await {
         Ok(pool) => pool,
         Err(err) => {

@@ -181,20 +181,11 @@ impl Config {
         // Security: require `sslmode=require` outside loopback. Loopback
         // (localhost/dev) is allowed with an explicit WARNING; anything
         // else fails loud so credentials never travel in cleartext.
-        if !dsn_requires_ssl(&database_url) {
-            if dsn_host_is_loopback(&database_url) {
-                eprintln!(
-                    "WARNING pilotwave-worker: PILOTWAVE_DATABASE_URL lacks sslmode=require; \
-                     allowed only because the host is loopback (dev/localhost). \
-                     Production DSNs must append ?sslmode=require."
-                );
-            } else {
-                return Err(
-                    "PILOTWAVE_DATABASE_URL must include sslmode=require outside localhost \
-                     (A02: credentials would travel in cleartext)"
-                        .into(),
-                );
-            }
+        // The reader DSN gets the same rule: read-only probes carry
+        // credentials too.
+        ensure_dsn_tls(&database_url, "PILOTWAVE_DATABASE_URL")?;
+        if let Some(ro) = database_url_ro.as_deref() {
+            ensure_dsn_tls(ro, "PILOTWAVE_DATABASE_URL_RO")?;
         }
         let queue_name = env.optional("PILOTWAVE_QUEUE_NAME", "pilotwave.email");
         let backend_name = env.optional("PILOTWAVE_BACKEND_NAME", "default");
@@ -383,7 +374,9 @@ impl Config {
 }
 
 /// `true` when the DSN query carries `sslmode=require` (case-insensitive).
-fn dsn_requires_ssl(url: &str) -> bool {
+/// Public so `main` can re-validate the selected (reader) DSN immediately
+/// before `db::connect`.
+pub fn dsn_requires_ssl(url: &str) -> bool {
     let query = match url.split_once('?') {
         Some((_, query)) => query,
         None => return false,
@@ -410,9 +403,33 @@ fn dsn_host(url: &str) -> &str {
 }
 
 /// Loopback only: the single no-TLS case (dev).
-fn dsn_host_is_loopback(url: &str) -> bool {
+/// Public so `main` can re-validate the selected (reader) DSN immediately
+/// before `db::connect`.
+pub fn dsn_host_is_loopback(url: &str) -> bool {
     let host = dsn_host(url).to_ascii_lowercase();
     host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+/// Enforce `sslmode=require` outside loopback for the named DSN var.
+/// Loopback without TLS passes with an explicit WARNING (dev only);
+/// anything else is a loud startup error so reader/worker credentials
+/// never travel in cleartext.
+fn ensure_dsn_tls(dsn: &str, var_name: &str) -> Result<(), String> {
+    if dsn_requires_ssl(dsn) {
+        return Ok(());
+    }
+    if dsn_host_is_loopback(dsn) {
+        eprintln!(
+            "WARNING pilotwave-worker: {var_name} lacks sslmode=require; \
+             allowed only because the host is loopback (dev/localhost). \
+             Production DSNs must append ?sslmode=require."
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{var_name} must include sslmode=require outside localhost \
+         (A02: credentials would travel in cleartext)"
+    ))
 }
 
 /// SMTP host loopback check for the no-AUTH case (dev, Mailcrab).

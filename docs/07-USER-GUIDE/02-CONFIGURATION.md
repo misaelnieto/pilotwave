@@ -73,16 +73,20 @@ GRANT SELECT ON django_tasks_database_dbtaskresult TO pilotwave_reader;
 GRANT SELECT ON pilotwave_heartbeat TO pilotwave_reader;
 ```
 
-One encryption rule: if the database host is anything other than your
-own machine, the connection string must ask for encryption by ending in
-`?sslmode=require`, for example:
+One encryption rule, applying to both `PILOTWAVE_DATABASE_URL` and
+`PILOTWAVE_DATABASE_URL_RO`: if the database host is anything other
+than your own machine, the connection string must ask for encryption
+by ending in `?sslmode=require`, for example:
 
 ```dotenv
 postgres://pilotwave_worker:CHANGEME@db.internal:5432/pilotwave?sslmode=require
 ```
 
 Without it, the worker refuses to start — credentials and mail contents
-would otherwise travel over the network unencrypted. Connections to your
+would otherwise travel over the network unencrypted. The same check
+applies to the reader login: a remote `PILOTWAVE_DATABASE_URL_RO`
+without `?sslmode=require` is rejected before `status`, `list`,
+`inspect` or `is-alive` connect. Connections to your
 own machine (`localhost`) are allowed without it, which is convenient
 for local testing but not something to rely on in production.
 
