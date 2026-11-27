@@ -47,6 +47,7 @@ own connection string.
 | -------- | --------- | ------- | ------------ |
 | `PILOTWAVE_DATABASE_URL` | Yes | — | Worker login for the Django database. Missing or empty: worker refuses to start. |
 | `PILOTWAVE_DATABASE_URL_RO` | No | Reuses the worker login | Read-only login used by `status`, `list`, `inspect` and `is-alive`. Missing or empty: those commands reuse the worker login. |
+| `PILOTWAVE_SKIP_GRANT_CHECK` | No | `false` | Ad-hoc-only bypass for the startup least-privilege grant check. Keep disabled in production. |
 
 `PILOTWAVE_DATABASE_URL` must use the limited `pilotwave_worker` role,
 not Django's full-privilege `DATABASE_URL`. Django owns the tables and
@@ -94,6 +95,15 @@ without `?sslmode=require` is rejected before `status`, `list`,
 `inspect` or `is-alive` connect. Connections to your
 own machine (`localhost`) are allowed without it, which is convenient
 for local testing but not something to rely on in production.
+
+`PILOTWAVE_SKIP_GRANT_CHECK` (default `false`) skips the startup
+least-privilege check that verifies the worker role holds `SELECT,
+UPDATE` on `django_tasks_database_dbtaskresult` and `SELECT, INSERT,
+UPDATE` on `pilotwave_heartbeat`. It exists only for ad-hoc checks
+against a database with different grants. Keep it disabled in
+production: enabling it lets the worker start without the minimum
+grants and fail later on the first claim or heartbeat write instead of
+failing loud at startup.
 
 ## Queue and identity
 
