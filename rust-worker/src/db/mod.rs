@@ -23,12 +23,15 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use crate::contract::{HEARTBEAT_TABLE, QUEUE_TABLE};
 
 /// Least privilege the worker DSN must hold (see roadmap R-6):
-/// `SELECT, UPDATE` on the queue, `INSERT, UPDATE` on the heartbeat
-/// (see `.env.example`). Positional order: `missing_grants` maps results
+/// `SELECT, UPDATE` on the queue, `SELECT, INSERT, UPDATE` on the heartbeat
+/// (see `.env.example`). `SELECT` on the heartbeat is required because
+/// `status` and `is-alive` reuse the worker DSN when no reader DSN is
+/// configured. Positional order: `missing_grants` maps results
 /// to missing pairs.
 pub const REQUIRED_GRANTS: &[(&str, &str)] = &[
     (QUEUE_TABLE, "SELECT"),
     (QUEUE_TABLE, "UPDATE"),
+    (HEARTBEAT_TABLE, "SELECT"),
     (HEARTBEAT_TABLE, "INSERT"),
     (HEARTBEAT_TABLE, "UPDATE"),
 ];
@@ -52,7 +55,7 @@ pub fn grant_error_message(current_user: &str, missing: &[(&str, &str)]) -> Stri
         .collect();
     format!(
         "least-privilege check failed for role {current_user}: missing {} \
-         (worker needs SELECT, UPDATE on {QUEUE_TABLE} and INSERT, UPDATE on {HEARTBEAT_TABLE}); \
+         (worker needs SELECT, UPDATE on {QUEUE_TABLE} and SELECT, INSERT, UPDATE on {HEARTBEAT_TABLE}); \
          ask the DBA to run: {}. \
          Bypass only for ad-hoc checks with PILOTWAVE_SKIP_GRANT_CHECK=1.",
         missing
@@ -110,17 +113,21 @@ mod tests {
 
     #[test]
     fn todo_concedido_no_falta_nada() {
-        assert!(missing_grants(&[true, true, true, true]).is_empty());
+        assert!(missing_grants(&[true, true, true, true, true]).is_empty());
     }
 
     #[test]
     fn missing_grants_mapea_posicionales_a_pares() {
-        let missing = missing_grants(&[true, false, true, false]);
+        let missing = missing_grants(&[true, false, true, false, true]);
         assert_eq!(
             missing,
-            vec![(QUEUE_TABLE, "UPDATE"), (HEARTBEAT_TABLE, "UPDATE")]
+            vec![(QUEUE_TABLE, "UPDATE"), (HEARTBEAT_TABLE, "INSERT")]
         );
-        let missing = missing_grants(&[false, false, false, false]);
+        // The new heartbeat SELECT is positional too: without it the
+        // fallback `is-alive`/`status` probe cannot read the heartbeat.
+        let missing = missing_grants(&[true, true, false, true, true]);
+        assert_eq!(missing, vec![(HEARTBEAT_TABLE, "SELECT")]);
+        let missing = missing_grants(&[false, false, false, false, false]);
         assert_eq!(missing.len(), REQUIRED_GRANTS.len());
     }
 

@@ -58,8 +58,13 @@ CREATE ROLE pilotwave_worker LOGIN PASSWORD 'CHANGEME';
 GRANT CONNECT ON DATABASE pilotwave TO pilotwave_worker;
 GRANT SELECT, UPDATE ON django_tasks_database_dbtaskresult
   TO pilotwave_worker;
-GRANT INSERT, UPDATE ON pilotwave_heartbeat TO pilotwave_worker;
+GRANT SELECT, INSERT, UPDATE ON pilotwave_heartbeat TO pilotwave_worker;
 ```
+
+`SELECT` on `pilotwave_heartbeat` is required because `status` and
+`is-alive` reuse this login when `PILOTWAVE_DATABASE_URL_RO` is unset:
+without it the probe fails with `error reason=heartbeat_read_failed`
+and cron cannot restart a stale worker.
 
 `PILOTWAVE_DATABASE_URL_RO` is for everyday checking without any write
 power: read-only commands use it when it is set, so operators can run
